@@ -61,6 +61,10 @@ class ErrorDeDatos(Exception):
     pass
 
 
+class TensorFlowNoDisponible(Exception):
+    """Código de salida 3: el entorno no tiene TensorFlow (distinto de 1 = métrica bajo el umbral)."""
+
+
 # ================================================================== métricas de negocio a proporción de producción
 def pesos_dia(y):
     """Peso de cada fila en 'transacciones por día de producción': el fraude suma ~24/día; las legítimas, ~199.976/día."""
@@ -190,7 +194,7 @@ def entrenar_nam(A_train, y_train, w_train, A_val, y_val, wd_val, grupos, capas=
         import keras
         import tensorflow as tf
     except ImportError as e:
-        raise SystemExit(f"TensorFlow/Keras no está instalado ({e}). Instala servicio-ia/requirements-ci.txt") from None
+        raise TensorFlowNoDisponible(f"TensorFlow/Keras no está instalado ({e}). Instala requirements-ci.txt (en la raíz del repositorio)") from None
 
     keras.utils.set_random_seed(SEMILLA)
     n_in = A_train.shape[1]
@@ -344,7 +348,11 @@ def main(argv=None):
 
     # ---------- 4. la red aditiva explicable
     print("Entrenando la red aditiva (TensorFlow)...")
-    red = entrenar_nam(A_train, y_train, w_train, A_val, y_val, wd_val, grupos, epocas=args.epocas)
+    try:
+        red = entrenar_nam(A_train, y_train, w_train, A_val, y_val, wd_val, grupos, epocas=args.epocas)
+    except TensorFlowNoDisponible as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 3
     met, cal, umb, info = evaluar(red["predecir"](A_val), red["predecir"](A_test))
 
     # ---------- 5. puerta de calidad: umbral fijado por el equipo (calidad.json), medido sobre PRUEBA
