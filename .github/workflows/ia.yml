@@ -1,0 +1,198 @@
+name: ia
+
+# Pipeline del microservicio de IA (EP2, secciones 2.2 y 2.5 del enunciado)
+#   Pull request hacia dev o main : tratamiento + tests + entrenamiento con puerta de calidad + build y prueba de la imagen (NO publica)
+#   Push a main (merge desde dev) : lo anterior + publicación en GHCR con los tags sha-<commit> y latest
+#   Tag ep2 sobre main            : re-etiqueta como :ep2 la MISMA imagen ya probada y publicada para ese commit (no reconstruye)
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [main]
+    tags: [ep2]
+
+concurrency:
+  group: ia-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGEN: servicio-ia
+  PYTHON_VERSION: "3.11"          # la misma versión que la imagen (python:3.11-slim)
+  KERAS_BACKEND: tensorflow
+  TF_CPP_MIN_LOG_LEVEL: "2"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  construir:
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements-ci.txt
+            servicio-ia/requirements.txt
+
+      - name: Instalar dependencias del pipeline
+        run: python -m pip install -r requirements-ci.txt
+
+      # 1. Tratamiento: SIEMPRE se regenera desde los datos crudos; nada de lo tratado se sube a mano
+      - name: Tratamiento de datos (preparar.py)
+        run: python datos/preparar.py --entrada datos/crudo --salida datos/tratado
+
+      - name: Tests del tratamiento (sin duplicados ni nulos en claves)
+        run: python -m pytest datos -q
+
+      # 2. Entrenamiento + puerta de calidad (umbral fijado por el equipo en servicio-ia/calidad.json)
+      - name: Entrenar y aplicar la puerta de calidad
+        run: |
+          python servicio-ia/entrenar.py \
+            --tratado datos/tratado --salida servicio-ia/model \
+            --version "2.0.0+${GITHUB_SHA::7}" \
+          || {
+            codigo=$?
+            case $codigo in
+              1) motivo="la métrica sobre PRUEBA no alcanza el umbral de servicio-ia/calidad.json: no se exporta el modelo" ;;
+              2) motivo="datos inválidos o faltan archivos de datos/tratado" ;;
+              3) motivo="TensorFlow no está disponible en el entorno" ;;
+              *) motivo="error inesperado (código $codigo)" ;;
+            esac
+            echo "::error title=Entrenamiento falló::$motivo"
+            exit $codigo
+          }
+
+      # 3. Tests del servicio contra el modelo recién entrenado (incluye la paridad API/entrenamiento)
+      - name: Tests del microservicio de IA
+        run: python -m pytest servicio-ia -q
+
+      - name: Guardar reportes (tratamiento, entrenamiento y metadatos del modelo)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reportes-ia-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: ignore
+          path: |
+            datos/tratado/reporte_tratamiento.md
+            datos/tratado/reporte_tratamiento.json
+            datos/tratado/manifiesto.json
+            servicio-ia/reporte_entrenamiento.json
+            servicio-ia/model/metadata.json
+            servicio-ia/model/umbrales.json
+
+      # 4. Imagen: se construye una vez (linux/amd64), se PRUEBA corriendo y, si corresponde, esa misma imagen se publica
+      - name: Nombre de la imagen en GHCR (en minúsculas)
+        id: img
+        run: echo "nombre=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGEN}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Metadatos de la imagen (tags y etiquetas OCI, incluida la revisión del commit)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.nombre }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Construir la imagen (no se publica todavía)
+        uses: docker/build-push-action@v6
+        with:
+          context: .                            # raíz: el Dockerfile copia datos/preparar.py
+          file: servicio-ia/Dockerfile          # su lista blanca es servicio-ia/Dockerfile.dockerignore
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.IMAGEN }}:ci
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Prueba de humo de la imagen (arranca, /health y /predict)
+        run: |
+          trap 'docker rm -f ia-smoke >/dev/null 2>&1 || true' EXIT
+          docker run -d --name ia-smoke -p 8000:8000 "${IMAGEN}:ci"
+
+          for _ in $(seq 1 30); do
+            curl -fsS http://localhost:8000/health >/dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -fsS http://localhost:8000/health || { docker logs ia-smoke; echo "::error::la imagen no quedó healthy"; exit 1; }
+          echo
+
+          curl -fsS -X POST http://localhost:8000/predict -H 'content-type: application/json' -d @- <<'JSON' | tee /tmp/respuesta.json
+          {"transaccion_id": "smoke_001", "usuario_id": "usr_smoke", "comercio_id": "com_smoke",
+           "timestamp": "2026-10-15T20:00:00Z", "monto": 10000, "canal": "app", "pais_transaccion": "CL", "mcc": 5411}
+          JSON
+          echo
+          python - <<'PY'
+          import json
+          r = json.load(open("/tmp/respuesta.json"))
+          assert r["decision"] in ("aprobar", "revisar", "bloquear"), r
+          assert 0 <= r["probabilidad_fraude"] <= 1, r
+          assert r["version_modelo"], r
+          print("predicción válida · modelo", r["version_modelo"])
+          PY
+
+          echo "commit registrado en la imagen: $(docker image inspect "${IMAGEN}:ci" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+
+      - name: Iniciar sesión en GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publicar la imagen probada (sha-… y latest)
+        if: github.event_name != 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          echo "$TAGS" | while read -r tag; do
+            [ -z "$tag" ] && continue
+            docker tag "${IMAGEN}:ci" "$tag"
+            docker push "$tag"
+          done
+
+  # ---------------------------------------------------------------------------
+  publicar-ep2:
+    if: github.ref_type == 'tag' && github.ref_name == 'ep2'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: El tag ep2 debe estar sobre un commit de main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::el tag ep2 no está sobre main: los tags de entrega salen de main"; exit 1; }
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Etiquetar como ep2 la imagen ya probada de este commit
+        run: |
+          imagen="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGEN}"
+          origen="${imagen}:sha-${GITHUB_SHA::7}"
+          docker buildx imagetools inspect "$origen" >/dev/null 2>&1 \
+            || { echo "::error::no existe $origen: el workflow de main para este commit no publicó (¿falló o no se ejecutó?)"; exit 1; }
+          docker buildx imagetools create -t "${imagen}:ep2" "$origen"
+          docker buildx imagetools inspect "${imagen}:ep2"
