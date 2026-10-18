@@ -1,0 +1,4 @@
+# Lista blanca del contexto (raíz del repo) para servicio-dominio/Dockerfile
+*
+!servicio-dominio/requirements.txt
+!servicio-dominio/main.py
