@@ -47,7 +47,9 @@ def test_variables_del_servicio_coinciden_con_las_del_entrenamiento():
         r = raw.loc[tid]
         did = _none(r["dispositivo_id"])
         payload = {
-            "transaccion_id": tid, "usuario_id": r["usuario_id"], "comercio_id": r["comercio_id"], "dispositivo_id": did,
+            # El CSV contiene comercios faltantes; el servicio no usa este identificador
+            # para construir variables cuando la lista negra ya fue resuelta.
+            "transaccion_id": tid, "usuario_id": r["usuario_id"], "comercio_id": _none(r["comercio_id"]) or "", "dispositivo_id": did,
             "timestamp": r["timestamp"], "monto": r["monto"], "moneda": _none(r["moneda"]), "canal": r["canal"],
             "pais_transaccion": r["pais_transaccion"], "mcc": r["mcc"], "latitud": _none(r["latitud"]), "longitud": _none(r["longitud"]),
             "ip": _none(r["ip"]), "tarjeta_enmascarada": _none(r["tarjeta_enmascarada"]),
