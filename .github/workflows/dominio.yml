@@ -75,7 +75,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: servicio-carga/Dockerfile
+          file: servicio-dominio/Dockerfile
           platforms: linux/amd64
           load: true
           tags: ${{ env.IMAGEN }}:ci
