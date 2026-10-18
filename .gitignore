@@ -1,0 +1,8 @@
+# Se generan en el pipeline; NUNCA se suben a mano (un .pkl/.joblib sin el script que lo produce no cumple).
+datos/tratado/
+servicio-ia/model/
+servicio-ia/model.tmp/
+servicio-ia/reporte_entrenamiento.json
+*.pkl
+*.joblib
+__pycache__/

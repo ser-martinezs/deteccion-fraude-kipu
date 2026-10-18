@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guardián Centinela · Kipu Pagos</title>
+<style>
+  :root{--bg:#f4f6fa;--card:#fff;--ink:#1b2430;--mut:#5b6777;--line:#dfe4ec;--azul:#1f6feb;--ok:#1a7f37;--rev:#b26a00;--blo:#c62828}
+  *{box-sizing:border-box} body{margin:0;font:15px/1.45 system-ui,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:var(--ink)}
+  header{background:#0d2a4d;color:#fff;padding:14px 20px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between}
+  header h1{font-size:19px;margin:0} header small{opacity:.75}
+  .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{font-size:12px;padding:3px 9px;border-radius:99px;border:1px solid #ffffff44}
+  .chip.ok{background:#1a7f3755;border-color:#5fd38a} .chip.err{background:#c6282866;border-color:#ff8a8a}
+  main{max-width:1200px;margin:0 auto;padding:16px;display:grid;grid-template-columns:minmax(0,420px) minmax(0,1fr);gap:16px}
+  @media (max-width:900px){main{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px} .wide{grid-column:1/-1}
+  h2{font-size:14px;margin:0 0 12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}
+  label{display:block;font-size:12px;color:var(--mut);margin:8px 0 3px}
+  input,select{width:100%;padding:8px 9px;border:1px solid var(--line);border-radius:7px;font:inherit;background:#fff}
+  .fila{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  button{font:inherit;border:0;border-radius:7px;padding:9px 14px;cursor:pointer;background:var(--azul);color:#fff}
+  button.sec{background:#e8eef8;color:#1b2430} button:disabled{opacity:.6}
+  .acciones{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+  .decision{font-size:28px;font-weight:700;text-transform:uppercase}
+  .aprobar{color:var(--ok)} .revisar{color:var(--rev)} .bloquear{color:var(--blo)}
+  .barra{height:10px;background:#eef1f6;border-radius:99px;overflow:hidden;margin:6px 0 2px}
+  .barra>div{height:100%;background:linear-gradient(90deg,#1a7f37,#b26a00,#c62828)}
+  .meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:10px}
+  .meta div{background:#f6f8fb;border-radius:7px;padding:7px 9px;font-size:12px;color:var(--mut)} .meta b{display:block;color:var(--ink);font-size:14px;word-break:break-all}
+  ol{padding-left:20px;margin:6px 0} li{margin:3px 0} .sube{color:var(--blo)} .baja{color:var(--ok)}
+  table{width:100%;border-collapse:collapse;font-size:13px} th,td{text-align:left;padding:6px;border-bottom:1px solid var(--line)} th{color:var(--mut)}
+  .aviso{background:#fff7e6;border:1px solid #f3d19c;border-radius:7px;padding:8px;font-size:13px;margin-top:10px}
+  .error{background:#fdecec;border:1px solid #f5b5b5;border-radius:7px;padding:8px;font-size:13px}
+  .vacio{color:#8a94a3}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>Guardián Centinela</h1><small>Kipu Pagos · detección de fraude en línea · EP2</small></div>
+  <div class="chips" id="chips"><span class="chip">cargando…</span></div>
+</header>
+<main>
+  <section class="card">
+    <h2>Evaluar transacción</h2>
+    <form id="form">
+      <label for="usuario_id">Usuario</label><select id="usuario_id"></select>
+      <div class="fila">
+        <div><label for="dispositivo_id">Dispositivo</label><input id="dispositivo_id"></div>
+        <div><label for="comercio_id">Comercio</label><input id="comercio_id" required></div>
+      </div>
+      <div class="fila">
+        <div><label for="monto">Monto</label><input id="monto" type="number" min="1" step="0.01" value="24700" required></div>
+        <div><label for="moneda">Moneda</label><select id="moneda"><option>CLP</option><option>USD</option></select></div>
+      </div>
+      <div class="fila">
+        <div><label for="canal">Canal</label><select id="canal"><option>app</option><option>web</option><option>pos</option><option>api</option></select></div>
+        <div><label for="mcc">Rubro (MCC)</label><select id="mcc">
+          <option value="5411">5411 supermercado</option><option value="5812">5812 restaurante</option><option value="5912">5912 farmacia</option>
+          <option value="5541">5541 combustible</option><option value="5732">5732 electrónica</option><option value="5691">5691 vestuario</option>
+          <option value="4814">4814 telecomunicaciones</option><option value="4900">4900 servicios</option><option value="7011">7011 hotel</option>
+          <option value="5999">5999 retail</option><option value="6011">6011 retiro de efectivo</option><option value="7995">7995 apuestas</option></select></div>
+      </div>
+      <div class="fila">
+        <div><label for="pais_transaccion">País</label><select id="pais_transaccion"><option>CL</option><option>AR</option><option>PE</option><option>BR</option><option>CO</option><option>US</option><option>VE</option><option>RU</option><option>NG</option></select></div>
+        <div><label for="intentos_previos_1h">Intentos previos 1 h</label><input id="intentos_previos_1h" type="number" min="0" value="0"></div>
+      </div>
+      <div class="fila">
+        <div><label for="ip">IP</label><input id="ip" value="186.10.20.30"></div>
+        <div><label for="tarjeta_enmascarada">Tarjeta (enmascarada)</label><input id="tarjeta_enmascarada" value="****4321"></div>
+      </div>
+      <div class="acciones">
+        <button type="submit" id="btn">Evaluar</button>
+        <button type="button" class="sec" id="normal">Ejemplo normal</button>
+        <button type="button" class="sec" id="sospechoso">Ejemplo sospechoso</button>
+        <button type="button" class="sec" id="carga">Enviar 30 seguidas</button>
+      </div>
+    </form>
+  </section>
+  <section class="card" id="resultado">
+    <h2>Resultado</h2>
+    <p class="vacio">Complete el formulario y presione <b>Evaluar</b>. El dominio consulta la base (usuario, dispositivo, lista negra),
+      llama al modelo a través del gateway y registra la decisión.</p>
+  </section>
+  <section class="card wide">
+    <h2>Últimas decisiones registradas <small id="resumen" class="vacio"></small></h2>
+    <div style="overflow-x:auto"><table>
+      <thead><tr><th>#</th><th>Transacción</th><th>Usuario</th><th>Decisión</th><th>Origen</th><th>Prob.</th><th>Modelo</th><th>ms</th><th>Fecha</th></tr></thead>
+      <tbody id="tabla"><tr><td colspan="9" class="vacio">sin datos</td></tr></tbody>
+    </table></div>
+  </section>
+</main>
+<script>
+const API = "/api/dominio";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function api(path, opts) {
+  const r = await fetch(API + path, {headers: {"Content-Type": "application/json"}, ...opts});
+  const t = await r.text(); let b; try { b = JSON.parse(t); } catch { b = {detail: t}; }
+  if (!r.ok) throw Object.assign(new Error(typeof b.detail === "string" ? b.detail : JSON.stringify(b.detail || b)), {status: r.status});
+  return b;
+}
+
+async function estado() {
+  const chips = [];
+  for (const [n, url] of [["gateway", "/health"], ["dominio", "/api/dominio/health"], ["ia", "/api/ia/health"]]) {
+    try { const r = await fetch(url); const b = await r.json().catch(() => ({}));
+      const rep = n === "ia" && r.headers.get("X-Upstream") ? " · " + r.headers.get("X-Upstream") : "";
+      chips.push(`<span class="chip ${r.ok ? "ok" : "err"}">${n}${rep}${b.version_modelo ? " · modelo " + esc(b.version_modelo) : ""}</span>`);
+    } catch { chips.push(`<span class="chip err">${n} caído</span>`); }
+  }
+  $("chips").innerHTML = chips.join("");
+}
+
+async function usuarios() {
+  try {
+    const l = await api("/usuarios?limit=20");
+    $("usuario_id").innerHTML = l.map(u => `<option value="${esc(u.usuario_id)}" data-d="${esc(u.dispositivo_id || "")}" data-c="${esc(u.comercio_id || "")}">
+      ${esc(u.usuario_id)} · ${esc(u.segmento || "?")} · KYC ${u.nivel_kyc ?? "?"}</option>`).join("");
+    $("usuario_id").onchange = () => { const o = $("usuario_id").selectedOptions[0]; $("dispositivo_id").value = o.dataset.d; $("comercio_id").value = o.dataset.c; };
+    $("usuario_id").onchange();
+  } catch { $("usuario_id").innerHTML = `<option value="KP301626">KP301626 (sin conexión al dominio)</option>`; $("comercio_id").value = "CM40294"; }
+}
+
+function payload() {
+  const v = id => $(id).value.trim();
+  const p = {usuario_id: v("usuario_id"), comercio_id: v("comercio_id"), monto: Number(v("monto")), moneda: v("moneda"), canal: v("canal"),
+             mcc: v("mcc"), pais_transaccion: v("pais_transaccion"), intentos_previos_1h: Number(v("intentos_previos_1h") || 0)};
+  for (const k of ["dispositivo_id", "ip", "tarjeta_enmascarada"]) if (v(k)) p[k] = v(k);
+  return p;
+}
+
+function pintar(r) {
+  const pct = r.probabilidad_fraude == null ? null : Math.round(r.probabilidad_fraude * 1000) / 10;
+  const razones = (r.razones || []).map(x => x.tipo === "modelo"
+    ? `<li><b>${esc(x.factor)}</b> <span class="${x.aporte_logodds > 0 ? "sube" : "baja"}">${esc(x.efecto)} (${x.aporte_logodds > 0 ? "+" : ""}${x.aporte_logodds})</span>${x.valor != null ? " · valor " + esc(x.valor) : ""}</li>`
+    : `<li><b>${x.tipo === "regla" ? "Regla dura" : "Reserva"}:</b> ${esc(x.descripcion)}</li>`).join("");
+  $("resultado").innerHTML = `<h2>Resultado</h2>
+    <div class="decision ${esc(r.decision)}">${esc(r.decision)}</div>
+    <div>Origen: <b>${esc(r.origen)}</b> · transacción ${esc(r.transaccion_id)}</div>
+    ${pct == null ? `<div class="aviso">El modelo no respondió: se aplicó la <b>política de reserva</b> (RNF3).</div>`
+      : `<div class="barra"><div style="width:${Math.max(pct, 1)}%"></div></div><small>Probabilidad de fraude: <b>${pct}%</b></small>`}
+    <h2 style="margin-top:14px">Razones, ordenadas por peso</h2><ol>${razones || "<li class='vacio'>sin razones</li>"}</ol>
+    <div class="meta">
+      <div>Versión del modelo<b>${esc(r.version_modelo || "—")}</b></div>
+      <div>Versión de umbrales<b>${esc(r.version_umbrales || "—")}</b></div>
+      <div>Latencia total<b>${esc(r.latencia_ms)} ms</b></div>
+      <div>Desglose<b>BD ${r.desglose_ms?.base_de_datos} · IA ${r.desglose_ms?.ia} ms</b></div>
+    </div>
+    <p style="font-size:13px"><a href="${API}/predicciones/${encodeURIComponent(r.transaccion_id)}" target="_blank" rel="noopener">Reproducir esta decisión (RF7, auditoría)</a></p>`;
+}
+
+async function evaluar(p) {
+  $("btn").disabled = true;
+  try { pintar(await api("/evaluar", {method: "POST", body: JSON.stringify(p)})); }
+  catch (e) { $("resultado").innerHTML = `<h2>Resultado</h2><div class="error"><b>Error ${esc(e.status || "")}</b>: ${esc(e.message)}</div>`; }
+  finally { $("btn").disabled = false; tabla(); estado(); }
+}
+
+async function tabla() {
+  try {
+    const [f, res] = await Promise.all([api("/predicciones?limit=12"), api("/resumen")]);
+    $("tabla").innerHTML = f.length ? f.map(x => `<tr><td>${x.prediccion_id}</td><td>${esc(x.transaccion_id)}</td><td>${esc(x.usuario_id)}</td>
+      <td class="${esc(x.decision)}"><b>${esc(x.decision)}</b></td><td>${esc(x.origen)}</td><td>${x.probabilidad ?? "—"}</td>
+      <td>${esc(x.version_modelo || "—")}</td><td>${x.latencia_ms}</td><td>${new Date(x.creado_utc).toLocaleString("es-CL")}</td></tr>`).join("")
+      : `<tr><td colspan="9" class="vacio">Aún no hay decisiones</td></tr>`;
+    const t = res.tablas;
+    $("resumen").textContent = ` · base: ${t.usuarios} usuarios, ${t.dispositivos} dispositivos, ${t.transacciones} transacciones, ${t.lista_negra_activa} en lista negra, ${t.predicciones} decisiones`;
+  } catch { /* el dominio puede estar caído: lo muestran los chips de arriba */ }
+}
+
+$("form").onsubmit = e => { e.preventDefault(); evaluar(payload()); };
+$("normal").onclick = () => { $("monto").value = 18500; $("moneda").value = "CLP"; $("canal").value = "pos"; $("mcc").value = "5411";
+  $("pais_transaccion").value = "CL"; $("intentos_previos_1h").value = 0; $("ip").value = "186.10.20.30"; };
+$("sospechoso").onclick = () => { $("monto").value = 250; $("moneda").value = "USD"; $("canal").value = "api"; $("mcc").value = "7995";
+  $("pais_transaccion").value = "NG"; $("intentos_previos_1h").value = 12; $("ip").value = ""; };
+$("carga").onclick = async () => { const p = payload(); for (let i = 0; i < 30; i++) await evaluar(p); };
+usuarios(); estado(); tabla(); setInterval(() => { tabla(); estado(); }, 5000);
+</script>
+</body>
+</html>

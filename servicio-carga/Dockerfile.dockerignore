@@ -1,0 +1,9 @@
+# Lista blanca del contexto (raíz del repo) para servicio-carga/Dockerfile
+*
+!servicio-carga/requirements.txt
+!servicio-carga/schema.sql
+!servicio-carga/carga.py
+!datos/tratado/usuarios.csv
+!datos/tratado/dispositivos.csv
+!datos/tratado/lista_negra.csv
+!datos/tratado/transacciones.csv

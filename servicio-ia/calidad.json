@@ -1,0 +1,7 @@
+{
+  "descripcion": "Umbrales mínimos de calidad fijados por el equipo. El job de la imagen de IA NO construye la imagen si el modelo entrenado queda por debajo en el conjunto de PRUEBA.",
+  "roc_auc_min": 0.96,
+  "pr_auc_prod_min": 0.45,
+  "fraudes_prueba_min": 20,
+  "nota": "Punto de partida: un poco bajo la regresión logística de referencia (ROC-AUC 0,984 / PR-AUC re-ponderada a producción 0,53) para no bloquear por ruido, ya que la prueba tiene ~44 fraudes. Subir estos valores después de las primeras corridas reales con TensorFlow. Cambiar este archivo es una decisión del equipo y queda en el historial de git."
+}

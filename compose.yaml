@@ -1,0 +1,121 @@
+# Guardián Centinela · Kipu Pagos · EP2 · sistema completo en contenedores
+#
+#   docker compose -p equipoNN pull
+#   docker compose -p equipoNN up -d
+#   -> http://localhost:8080
+#
+# Reglas de la sección 2.3: solo imágenes publicadas por el pipeline (sin construir nada aquí), linux/amd64 en GHCR,
+# sin bind mounts (la base usa un volumen con nombre), solo el gateway publica puerto (8080), healthcheck y
+# límites de recursos en cada servicio, nada secreto (valores locales por defecto; ver .env.example).
+# Los límites cpus/mem_limit se ajustan con la medición de `docker stats` del capítulo 7.2.
+
+name: kipu-guardian-centinela
+
+services:
+
+  gateway:
+    image: ghcr.io/ser-martinezs/servicio-gateway:ep2
+    ports:
+      - "8080:8080"                          # ÚNICO puerto publicado del sistema
+    depends_on:
+      front:   { condition: service_healthy }
+      dominio: { condition: service_healthy }
+      ia:      { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    cpus: 0.50
+    mem_limit: 64m
+    restart: unless-stopped
+    networks: [interna]
+
+  front:
+    image: ghcr.io/ser-martinezs/servicio-front:ep2
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    cpus: 0.25
+    mem_limit: 32m
+    restart: unless-stopped
+    networks: [interna]
+
+  dominio:
+    image: ghcr.io/ser-martinezs/servicio-dominio:ep2
+    environment:
+      DATABASE_URL: postgresql://kipu:${POSTGRES_PASSWORD:-kipu_local}@db:5432/kipu
+      IA_URL: http://gateway:8080/api/ia     # la IA se consume a través del gateway (balanceo entre réplicas)
+      IA_TIMEOUT_MS: ${IA_TIMEOUT_MS:-500}
+      POLITICA_RESERVA: ${POLITICA_RESERVA:-reglas}
+    depends_on:
+      db:    { condition: service_healthy }
+      carga: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    cpus: 1.00
+    mem_limit: 256m
+    restart: unless-stopped
+    networks: [interna]
+
+  ia:
+    image: ghcr.io/ser-martinezs/servicio-ia:ep2
+    deploy:
+      replicas: 2                            # el gateway reparte entre las dos (round-robin + reintento)
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    cpus: 0.50
+    mem_limit: 512m
+    restart: unless-stopped
+    networks: [interna]
+
+  carga:
+    image: ghcr.io/ser-martinezs/servicio-carga:ep2
+    environment:
+      DATABASE_URL: postgresql://kipu:${POSTGRES_PASSWORD:-kipu_local}@db:5432/kipu
+    depends_on:
+      db: { condition: service_healthy }
+    restart: "no"                            # corre una vez y termina; ON CONFLICT DO NOTHING evita duplicados
+    healthcheck:
+      test: ["CMD", "python", "-c", "import psycopg"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    cpus: 0.50
+    mem_limit: 128m
+    networks: [interna]
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: kipu
+      POSTGRES_USER: kipu
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kipu_local}
+    volumes:
+      - datos-pg:/var/lib/postgresql/data    # volumen con nombre (no bind mount)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kipu -d kipu"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    cpus: 1.00
+    mem_limit: 256m
+    restart: unless-stopped
+    networks: [interna]
+
+volumes:
+  datos-pg:
+
+networks:
+  interna:
+    driver: bridge

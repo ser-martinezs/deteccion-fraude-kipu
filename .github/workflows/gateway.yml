@@ -1,0 +1,115 @@
+name: gateway
+
+# Pipeline de el API gateway (nginx) (EP2, secciones 2.1 y 2.5)
+#   Pull request hacia dev o main : build y prueba de la imagen (NO publica)
+#   Push a main                   : lo anterior + publicación en GHCR con los tags sha-<commit> y latest
+#   Tag ep2 sobre main            : re-etiqueta como :ep2 la MISMA imagen ya probada para ese commit
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [main]
+    tags: [ep2]
+
+concurrency:
+  group: gateway-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGEN: servicio-gateway
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  construir:
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Imagen linux/amd64: se construye, se prueba y solo entonces se publica
+      - name: Nombre de la imagen en GHCR (en minúsculas)
+        id: img
+        run: echo "nombre=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGEN}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Metadatos de la imagen (incluye org.opencontainers.image.revision)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.nombre }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Construir la imagen (no se publica todavía)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: servicio-gateway/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.IMAGEN }}:ci
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Prueba de la imagen (configuración de nginx válida y /health responde)
+        run: |
+          docker run --rm --add-host front:127.0.0.1 --add-host dominio:127.0.0.1 --add-host ia:127.0.0.1 "${IMAGEN}:ci" nginx -t
+          trap 'docker rm -f gw-smoke >/dev/null 2>&1 || true' EXIT
+          docker run -d --name gw-smoke -p 8080:8080 --add-host front:127.0.0.1 --add-host dominio:127.0.0.1 --add-host ia:127.0.0.1 "${IMAGEN}:ci"
+          for _ in $(seq 1 15); do curl -fsS http://localhost:8080/health && break; sleep 1; done
+          curl -fsS http://localhost:8080/health
+          # sin servicios detrás, el gateway debe responder 503 en JSON (no colgarse ni devolver HTML)
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/api/ia/health)" = "503"
+          echo "commit registrado en la imagen: $(docker image inspect "${IMAGEN}:ci" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+
+      - name: Iniciar sesión en GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publicar la imagen probada (sha-… y latest)
+        if: github.event_name != 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          echo "$TAGS" | while read -r tag; do
+            [ -z "$tag" ] && continue
+            docker tag "${IMAGEN}:ci" "$tag"
+            docker push "$tag"
+          done
+
+  publicar-ep2:
+    if: github.ref_type == 'tag' && github.ref_name == 'ep2'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: El tag ep2 debe estar sobre un commit de main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::el tag ep2 no está sobre main"; exit 1; }
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Etiquetar como ep2 la imagen ya probada de este commit
+        run: |
+          imagen="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGEN}"
+          origen="${imagen}:sha-${GITHUB_SHA::7}"
+          docker buildx imagetools inspect "$origen" >/dev/null 2>&1 || { echo "::error::no existe $origen"; exit 1; }
+          docker buildx imagetools create -t "${imagen}:ep2" "$origen"
