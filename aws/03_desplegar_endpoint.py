@@ -42,6 +42,15 @@ def esperar_endpoint(sm, nombre):
                  f"Detalle en CloudWatch → Logs → /aws/sagemaker/Endpoints/{nombre}")
 
 
+def borrar_endpoint_fallido(sm, nombre):
+    print(f"3/3 El endpoint {nombre} está en estado Failed: lo borro antes de recrearlo")
+    sm.delete_endpoint(EndpointName=nombre)
+    sm.get_waiter("endpoint_deleted").wait(
+        EndpointName=nombre,
+        WaiterConfig={"Delay": 10, "MaxAttempts": 60},
+    )
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--endpoint", default=config.NOMBRE_ENDPOINT, help="nombre del endpoint (no cambia entre ejecuciones)")
@@ -85,12 +94,20 @@ def main(argv=None):
         sm.create_endpoint(EndpointName=args.endpoint, EndpointConfigName=cfg, Tags=[{"Key": "proyecto", "Value": "ity1102-ep3"}])
         accion = "creado"
     else:
-        print(f"3/3 El endpoint {args.endpoint} ya existe ({previo['EndpointStatus']}): lo actualizo conservando su nombre")
-        if previo["EndpointStatus"] in ("Creating", "Updating", "SystemUpdating", "RollingBack", "Deleting"):
+        if previo["EndpointStatus"] == "Failed":
+            borrar_endpoint_fallido(sm, args.endpoint)
+            print(f"3/3 El endpoint {args.endpoint} fue eliminado: lo recreo")
+            sm.create_endpoint(EndpointName=args.endpoint, EndpointConfigName=cfg, Tags=[{"Key": "proyecto", "Value": "ity1102-ep3"}])
+            accion = "recreado"
+        elif previo["EndpointStatus"] in ("Creating", "Updating", "SystemUpdating", "RollingBack", "Deleting"):
             print("    esperando a que termine su operación en curso...")
             esperar_endpoint(sm, args.endpoint)
-        sm.update_endpoint(EndpointName=args.endpoint, EndpointConfigName=cfg)
-        accion = "actualizado"
+            sm.update_endpoint(EndpointName=args.endpoint, EndpointConfigName=cfg)
+            accion = "actualizado"
+        else:
+            print(f"3/3 El endpoint {args.endpoint} ya existe ({previo['EndpointStatus']}): lo actualizo conservando su nombre")
+            sm.update_endpoint(EndpointName=args.endpoint, EndpointConfigName=cfg)
+            accion = "actualizado"
 
     print("    esperando a InService (puede tardar unos minutos)...")
     esperar_endpoint(sm, args.endpoint)
