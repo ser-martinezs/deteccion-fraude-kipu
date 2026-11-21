@@ -47,7 +47,7 @@ RUTA_UMBRALES = Path(os.getenv("UMBRALES_PATH", RUTA_BASE / "config" / "umbrales
 REGION = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
 ENDPOINT = os.getenv("SAGEMAKER_ENDPOINT", "kipu-fraude-ep3")
 CONNECT_TIMEOUT_S = float(os.getenv("SAGEMAKER_CONNECT_TIMEOUT_S", "1"))
-READ_TIMEOUT_S = float(os.getenv("SAGEMAKER_READ_TIMEOUT_S", "1.5"))
+READ_TIMEOUT_S = float(os.getenv("SAGEMAKER_READ_TIMEOUT_S", "5"))
 HEALTH_TTL_S = float(os.getenv("HEALTH_TTL_S", "30"))
 HEALTH_ESTRICTO = os.getenv("HEALTH_ESTRICTO", "false").strip().lower() in ("1", "true", "yes", "si", "sí")
 
