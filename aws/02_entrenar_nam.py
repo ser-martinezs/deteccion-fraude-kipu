@@ -48,6 +48,7 @@ def empaquetar_codigo(s3, bucket, prefijo, nombre_trabajo):
     with tarfile.open(ruta, "w:gz") as t:
         t.add(config.AQUI / "src" / "train_nam.py", arcname="train_nam.py")
         t.add(config.AQUI / "src" / "inference.py", arcname="inference.py")      # train_nam.py lo copia a code/ del modelo
+        t.add(config.AQUI / "src" / "requirements.txt", arcname="requirements.txt")
     key = f"{prefijo}/codigo/{nombre_trabajo}/sourcedir.tar.gz"
     s3.upload_file(str(ruta), bucket, key)
     return f"s3://{bucket}/{key}"

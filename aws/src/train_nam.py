@@ -235,6 +235,7 @@ def main(argv=None):
 
     (raiz / "code").mkdir(parents=True, exist_ok=True)
     shutil.copy(Path(__file__).with_name("inference.py"), raiz / "code" / "inference.py")
+    shutil.copy(Path(__file__).with_name("requirements.txt"), raiz / "code" / "requirements.txt")
     shutil.copy(Path(args.config) / "preprocesador.json", raiz / "preprocesador.json")
     ahora = datetime.now(timezone.utc).isoformat(timespec="seconds")
     metadata = {
