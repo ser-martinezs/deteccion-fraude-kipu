@@ -69,7 +69,7 @@ services:
     environment:
       SAGEMAKER_ENDPOINT: ${SAGEMAKER_ENDPOINT:-kipu-fraude-ep3}
       AWS_REGION: ${AWS_REGION:-us-east-1}                 # sin claves: boto3 usa el perfil de la instancia EC2
-      SAGEMAKER_READ_TIMEOUT_S: ${SAGEMAKER_READ_TIMEOUT_S:-1.5}
+      SAGEMAKER_READ_TIMEOUT_S: ${SAGEMAKER_READ_TIMEOUT_S:-5}
     deploy:
       replicas: 2                            # el gateway reparte entre las dos (round-robin + reintento)
     healthcheck:
