@@ -90,3 +90,24 @@ CREATE TABLE IF NOT EXISTS predicciones (
 );
 CREATE INDEX IF NOT EXISTS ix_pred_tx    ON predicciones (transaccion_id);
 CREATE INDEX IF NOT EXISTS ix_pred_fecha ON predicciones (creado_utc DESC);
+
+-- EP3: resumen del LLM para el analista (RF5, RNF6). ALTER ... IF NOT EXISTS para bases que ya existían (idempotente)
+ALTER TABLE predicciones ADD COLUMN IF NOT EXISTS monto_usd       NUMERIC(14,4);
+ALTER TABLE predicciones ADD COLUMN IF NOT EXISTS estado_llm      TEXT NOT NULL DEFAULT 'no_aplica';
+ALTER TABLE predicciones ADD COLUMN IF NOT EXISTS resumen_llm     TEXT;
+ALTER TABLE predicciones ADD COLUMN IF NOT EXISTS llm_actualizado TIMESTAMPTZ;
+DO $$ BEGIN
+    ALTER TABLE predicciones ADD CONSTRAINT ck_pred_estado_llm
+        CHECK (estado_llm IN ('no_aplica','pendiente','listo','degradado'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+CREATE INDEX IF NOT EXISTS ix_pred_revision ON predicciones (probabilidad DESC, monto_usd DESC)
+    WHERE decision IN ('revisar','bloquear');
+
+-- EP3: último estado que reporta cada pieza asíncrona (el worker del LLM). Lo lee GET /api/health
+CREATE TABLE IF NOT EXISTS estado_servicios (
+    servicio     TEXT PRIMARY KEY,
+    estado       TEXT NOT NULL,                 -- ok | degradado
+    detalle      TEXT,
+    actualizado  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
