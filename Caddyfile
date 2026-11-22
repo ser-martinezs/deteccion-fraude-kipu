@@ -1,0 +1,7 @@
+# Caddy · HTTPS de Guardián Centinela en AWS (EP3). Solo se usa con compose.aws.yaml.
+# DOMINIO viene del .env del servidor, por ejemplo 3-85-10-20.sslip.io (la IP elástica con guiones).
+# Caddy pide y renueva solo el certificado de Let's Encrypt, redirige HTTP -> HTTPS y reenvía todo al gateway.
+{$DOMINIO} {
+	encode gzip
+	reverse_proxy gateway:8080
+}

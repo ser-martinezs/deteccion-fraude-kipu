@@ -6,3 +6,13 @@ servicio-ia/reporte_entrenamiento.json
 *.pkl
 *.joblib
 __pycache__/
+
+# EP3 · secretos y archivos locales: NUNCA al repositorio
+.env
+.env.*
+!.env.example
+*.pem
+aws/local/
+aws/estado.json
+aws/latencia_*.json
+pruebas/resultados/
