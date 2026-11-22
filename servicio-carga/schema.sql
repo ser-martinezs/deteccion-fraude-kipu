@@ -96,6 +96,7 @@ ALTER TABLE predicciones ADD COLUMN IF NOT EXISTS monto_usd       NUMERIC(14,4);
 ALTER TABLE predicciones ADD COLUMN IF NOT EXISTS estado_llm      TEXT NOT NULL DEFAULT 'no_aplica';
 ALTER TABLE predicciones ADD COLUMN IF NOT EXISTS resumen_llm     TEXT;
 ALTER TABLE predicciones ADD COLUMN IF NOT EXISTS llm_actualizado TIMESTAMPTZ;
+ALTER TABLE predicciones ADD COLUMN IF NOT EXISTS motivo_llm      TEXT;     -- por qué quedó degradado (HTTP 401, 429 tras 4 intentos...)
 DO $$ BEGIN
     ALTER TABLE predicciones ADD CONSTRAINT ck_pred_estado_llm
         CHECK (estado_llm IN ('no_aplica','pendiente','listo','degradado'));

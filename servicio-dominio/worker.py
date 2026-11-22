@@ -7,8 +7,9 @@ El sistema sobrevive al LLM:
   * tiempo máximo de espera por llamada (NVIDIA_TIMEOUT_S),
   * reintentos con espera creciente ante 429, timeout o caída (1, 2, 4, 8 s + azar), hasta NVIDIA_REINTENTOS,
   * clave inválida (401/403): no se reintenta,
-  * si no se logra, la predicción queda en modo degradado: el analista ve la decisión y las razones del modelo,
-    sin el texto del LLM. El mensaje se confirma (ack) igual, para que no quede dando vueltas en la cola.
+  * si no se logra, la predicción queda en modo degradado (con su motivo en predicciones.motivo_llm): el analista ve
+    la decisión y las razones del modelo, sin el texto del LLM. El mensaje se mueve a la cola `resumenes_llm.fallidos`
+    para reprocesarlo cuando NVIDIA vuelva, y se confirma (ack) en la principal para que no quede dando vueltas.
 El LLM nunca decide: solo redacta a partir de las razones que ya calculó el modelo.
 """
 from __future__ import annotations
@@ -29,6 +30,7 @@ from anonimizar import anonimizar
 DSN = os.getenv("DATABASE_URL", "postgresql://kipu:kipu@db:5432/kipu")
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/%2F")
 COLA_LLM = os.getenv("COLA_LLM", "resumenes_llm")
+COLA_FALLIDOS = f"{COLA_LLM}.fallidos"
 NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "")
 NVIDIA_TIMEOUT_S = float(os.getenv("NVIDIA_TIMEOUT_S", "15"))
@@ -93,8 +95,8 @@ def resumir(mensaje: dict, dormir=time.sleep) -> tuple[str, str | None, str]:
 
 
 def guardar(con: psycopg.Connection, prediccion_id: int, estado: str, resumen: str | None, detalle: str) -> None:
-    con.execute("UPDATE predicciones SET estado_llm = %s, resumen_llm = %s, llm_actualizado = now() WHERE prediccion_id = %s",
-                (estado, resumen, prediccion_id))
+    con.execute("""UPDATE predicciones SET estado_llm = %s, resumen_llm = %s, motivo_llm = %s, llm_actualizado = now()
+                   WHERE prediccion_id = %s""", (estado, resumen, None if estado == "listo" else detalle, prediccion_id))
     con.execute("""INSERT INTO estado_servicios (servicio, estado, detalle, actualizado) VALUES ('llm', %s, %s, now())
                    ON CONFLICT (servicio) DO UPDATE SET estado = EXCLUDED.estado, detalle = EXCLUDED.detalle,
                                                         actualizado = EXCLUDED.actualizado""",
@@ -102,11 +104,13 @@ def guardar(con: psycopg.Connection, prediccion_id: int, estado: str, resumen: s
     con.commit()
 
 
-def procesar(con: psycopg.Connection, cuerpo: bytes) -> str:
+def procesar(con: psycopg.Connection, cuerpo: bytes, a_fallidos=lambda cuerpo: None) -> str:
     mensaje = json.loads(cuerpo)
     t0 = time.perf_counter()
     estado, resumen, detalle = resumir(mensaje)
     guardar(con, int(mensaje["prediccion_id"]), estado, resumen, detalle)
+    if estado == "degradado":
+        a_fallidos(cuerpo)          # queda a la vista en la cola de fallidos (lo reporta GET /api/health)
     log.info("llm_resultado prediccion_id=%s estado=%s latencia_ms=%.0f", mensaje["prediccion_id"], estado,
              (time.perf_counter() - t0) * 1000)
     return estado
@@ -121,14 +125,19 @@ def main() -> None:
                 conexion = pika.BlockingConnection(pika.URLParameters(RABBITMQ_URL))
                 canal = conexion.channel()
                 canal.queue_declare(queue=COLA_LLM, durable=True)
-                canal.basic_qos(prefetch_count=1)      # de a un mensaje: respeta el límite por minuto de NVIDIA
+                canal.queue_declare(queue=COLA_FALLIDOS, durable=True)
+                canal.basic_qos(prefetch_count=1)
+
+                def a_fallidos(cuerpo: bytes) -> None:
+                    canal.basic_publish(exchange="", routing_key=COLA_FALLIDOS, body=cuerpo,
+                                        properties=pika.BasicProperties(delivery_mode=2, content_type="application/json"))      # de a un mensaje: respeta el límite por minuto de NVIDIA
                 log.info("worker conectado a la cola %s (modelo %s)", COLA_LLM, NVIDIA_MODEL or "-")
                 for metodo, _props, cuerpo in canal.consume(COLA_LLM, inactivity_timeout=30):
                     if metodo is None:
                         continue
                     t0 = time.monotonic()
                     try:
-                        procesar(con, cuerpo)
+                        procesar(con, cuerpo, a_fallidos)
                     except (json.JSONDecodeError, KeyError, ValueError) as e:
                         log.error("mensaje_invalido descartado: %s", e.__class__.__name__)
                     canal.basic_ack(metodo.delivery_tag)
