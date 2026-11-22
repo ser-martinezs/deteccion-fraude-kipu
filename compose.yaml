@@ -53,6 +53,7 @@ services:
       API_KEYS: ${API_KEYS:?falta API_KEYS en el .env}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-kipu}:${RABBITMQ_PASSWORD:-kipu_local}@rabbitmq:5672/%2F
       ROOT_PATH: /api                        # el gateway quita /api: así /docs muestra las rutas completas
+      LIMITE_POR_MINUTO: ${LIMITE_POR_MINUTO:-3000}   # rate limiting por cliente (429); subirlo solo para Locust
     depends_on:
       db:       { condition: service_healthy }
       carga:    { condition: service_completed_successfully }
