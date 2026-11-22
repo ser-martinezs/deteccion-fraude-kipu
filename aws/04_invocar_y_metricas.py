@@ -12,10 +12,14 @@ Qué hace:
   2. Invoca el endpoint con la prueba (que nunca se subió a S3) → ROC-AUC, PR-AUC (re-ponderada a producción), costo
      anual proyectado, fraude no detectado, FP sobre bloqueos, bloqueos y revisiones por día y detección.
   3. Compara con los mínimos del equipo (servicio-ia/calidad.json) y con el entrenamiento local (reporte_entrenamiento.json).
-  4. Hace UNA invocación individual y la muestra completa (el contrato que consume servicio-ia).
-  5. Publica las métricas en CloudWatch (namespace ITY1102/EP3) y lee las del endpoint (Invocations, ModelLatency,
+  4. Precisión, recall, F1, tasa de falsos positivos y accuracy en el umbral elegido, contra dos líneas base
+     ("todo legítimo" y "solo reglas duras"), en la muestra de prueba y reponderado a producción.
+  5. Hace UNA invocación individual y la muestra completa (el contrato que consume servicio-ia).
+  6. Publica las métricas en CloudWatch (namespace ITY1102/EP3) y lee las del endpoint (Invocations, ModelLatency,
      ModelSetupTime, errores 4XX/5XX). CloudWatch demora 1-3 min en mostrarlas.
   Guarda aws/metricas_prueba_sagemaker.json y aws/umbrales_sagemaker.json (mismo formato que servicio-ia/model/umbrales.json).
+
+La prueba es la que dejó el paso 01 (aws/local/corte.json): por defecto, estratificada y apartada antes de entrenar.
 
 Uso:  python aws/04_invocar_y_metricas.py [--lote 200] [--sin-cloudwatch] [--espera-cw 240]
 """
@@ -97,6 +101,30 @@ def calcular_metricas(ent, val, test, p_val, p_test):
     return met, umb, info
 
 
+def matriz(y, pred, w=None):
+    """Matriz de confusión y métricas de clasificación. Con pesos w (peso de producción), los conteos son 'por día'."""
+    y, pred = np.asarray(y).astype(bool), np.asarray(pred).astype(bool)
+    w = np.ones(len(y)) if w is None else np.asarray(w, dtype=float)
+    tp, fp, fn, tn = (float(w[a & b].sum()) for a, b in ((y, pred), (~y, pred), (y, ~pred), (~y, ~pred)))
+    precision = tp / (tp + fp) if tp + fp > 0 else float("nan")          # nan = el sistema no marcó nada
+    recall = tp / (tp + fn) if tp + fn > 0 else float("nan")
+    f1 = 2 * precision * recall / (precision + recall) if tp > 0 else 0.0
+    return {"precision": precision, "recall": recall, "f1": f1, "fpr": fp / (fp + tn) if fp + tn > 0 else float("nan"),
+            "accuracy": (tp + tn) / (tp + fp + fn + tn), "vp": tp, "fp": fp, "fn": fn, "vn": tn}
+
+
+def comparar_con_linea_base(ent, test, p_test, umb):
+    """Sistema completo (reglas duras + modelo con los umbrales elegidos) contra dos líneas base, sobre la PRUEBA."""
+    y, wd, n = test["y"], ent.pesos_dia(test["y"]), len(test["y"])
+    z = ent.decidir_zona(p_test, test["hora"], umb, test["dura"])           # 0 aprobar · 1 revisar · 2 bloquear; la regla dura bloquea
+    sistemas = {"todo legítimo (línea base)": np.zeros(n, dtype=bool),
+                "solo reglas duras (línea base)": test["dura"].astype(bool),
+                "reglas + modelo · bloquear": z == 2,
+                "reglas + modelo · revisar o bloquear": z >= 1}
+    return {nombre: {"muestra": matriz(y, pred), "produccion": matriz(y, pred, wd)} for nombre, pred in sistemas.items()}, \
+           {"prevalencia_muestra": float(np.mean(y)), "prevalencia_produccion": float(wd[y == 1].sum() / wd.sum())}
+
+
 def conjunto(df, NUM, CAT):
     return {"inst": a_instancias(df, NUM, CAT), "y": df["y"].to_numpy(), "usd": df["monto_usd"].to_numpy(),
             "hora": df["hora_local"].to_numpy(), "dura": df["lista_negra_dura"].astype(bool).to_numpy()}
@@ -116,6 +144,25 @@ def mostrar(met, calidad, local):
     print(f"  {'revisiones por día':<42} {met['revisiones_dia']:>7.1f}   (capacidad 4.800)")
     print(f"  {'detección (fraude capturado)':<42} {met['deteccion']:>7.1%}")
     print(f"  ({met['n_fraudes_prueba']} fraudes en {met['n_filas_prueba']:,} filas: diferencias pequeñas no son diferencias)")
+
+
+def mostrar_clasificacion(cmp, prev, met, corte):
+    def fila(nombre, m):
+        pct = lambda v, dec=1: "     -" if v != v else f"{v:6.{dec}%}"          # v != v: nan (el sistema no marcó nada)
+        return f"  {nombre:<38} {pct(m['precision'])} {pct(m['recall'])} {m['f1']:6.3f} {pct(m['fpr'], 2)} {m['accuracy']:8.2%}"
+    for etiqueta, clave, extra in (("MUESTRA de prueba (lo que mide la guía)", "muestra", f"prevalencia {prev['prevalencia_muestra']:.2%}"),
+                                   ("REPONDERADO a producción (lo que verá el negocio)", "produccion", f"prevalencia {prev['prevalencia_produccion']:.3%}")):
+        print(f"\n  {etiqueta} · corte {corte} · {extra}")
+        print(f"  {'sistema':<38} {'precisión':>6} {'recall':>6} {'F1':>6} {'FPR':>6} {'accuracy':>8}")
+        for nombre, d in cmp.items():
+            print(fila(nombre, d[clave]))
+    todo = cmp["todo legítimo (línea base)"]["muestra"]
+    print(f"\n  Por qué accuracy no sirve: 'todo legítimo' acierta {todo['accuracy']:.2%} y no detecta ningún fraude (recall {todo['recall']:.0%}).")
+    print(f"  PR-AUC del modelo {met['pr_auc_muestra']:.3f} contra {prev['prevalencia_muestra']:.3f} de un clasificador al azar (= la prevalencia).")
+    b, r = cmp["reglas + modelo · bloquear"]["produccion"], cmp["solo reglas duras (línea base)"]["produccion"]
+    print(f"  A producción el sistema completo bloquea ~{b['vp'] + b['fp']:.0f} transacciones por día: ~{b['vp']:.1f} fraudes y ~{b['fp']:.0f} clientes buenos (precisión {b['precision']:.1%}).")
+    print(f"  De esos clientes buenos, ~{r['fp']:.0f} los bloquea la lista negra dura (por cumplimiento, no por el modelo): sin contarla,")
+    print(f"  el modelo bloquea ~{met['bloqueos_dia']:.0f} por día con {met['fp_sobre_bloqueos']:.0%} de falsos positivos (la cifra que mide el costo de arriba).")
 
 
 # ---------------------------------------------------------------- CloudWatch
@@ -165,7 +212,7 @@ def main(argv=None):
 
     ent = config.importar_entrenar()
     d, NUM, CAT, FEATURES = config.cargar_tratado()
-    _, va, te = config.separar(d)
+    corte, _, va, te = config.cargar_corte(d)
     val, test = conjunto(va, NUM, CAT), conjunto(te, NUM, CAT)
 
     sess = config.sesion()
@@ -173,7 +220,7 @@ def main(argv=None):
     inicio = datetime.now(timezone.utc) - timedelta(minutes=1)
     invocador = lambda inst: invocar_lote(runtime, endpoint, inst)
 
-    print(f"Endpoint: {endpoint} ({sess.region_name})")
+    print(f"Endpoint: {endpoint} ({sess.region_name}) · corte {corte}: validación {len(va):,} filas, prueba {len(te):,} filas ({int(te['y'].sum())} fraudes)")
     print("1/4 Validación → umbrales")
     p_val = predecir(invocador, val["inst"], args.lote, "validación")
     print("2/4 PRUEBA → métricas")
@@ -189,7 +236,10 @@ def main(argv=None):
     print("\n  puerta de calidad del equipo:", "APROBADA" if not fallas else "NO APROBADA → " + "; ".join(fallas))
     print("  umbrales (costo mínimo en validación):", json.dumps({k: round(v, 5) for k, v in umb.items()}))
 
-    print("3/4 Invocación individual (contrato que consume servicio-ia)")
+    cmp, prev = comparar_con_linea_base(ent, test, p_test, umb)
+    mostrar_clasificacion(cmp, prev, met, corte)
+
+    print("\n3/4 Invocación individual (contrato que consume servicio-ia)")
     i = int(np.argmax(test["y"] == 1))                               # primer fraude de la prueba
     t0 = time.perf_counter()
     ejemplo = invocar(runtime, endpoint, {"variables": test["inst"][i]})
@@ -200,7 +250,7 @@ def main(argv=None):
     version = ejemplo["version_modelo"]
 
     salida = {"generado_en": datetime.now(timezone.utc).isoformat(timespec="seconds"), "endpoint": endpoint, "version_modelo": version,
-              "metricas_prueba": met, "umbrales": umb, "umbrales_cumplen_restricciones_en_validacion": info,
+              "corte": corte, "metricas_prueba": met, "umbrales": umb, "clasificacion_vs_linea_base": cmp, "prevalencia": prev, "umbrales_cumplen_restricciones_en_validacion": info,
               "aprobado": not fallas, "fallas": fallas, "ejemplo_invocacion": ejemplo, "latencia_ejemplo_ms": round(ms, 1),
               "hiperparametros": est.get("hiperparametros"), "memoria_mb": est.get("memoria_mb"), "concurrencia": est.get("concurrencia")}
     ruta = config.AQUI / "metricas_prueba_sagemaker.json"

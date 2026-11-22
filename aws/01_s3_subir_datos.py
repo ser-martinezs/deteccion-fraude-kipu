@@ -3,7 +3,11 @@
 01_s3_subir_datos.py · Crea el bucket y sube los CSV (la PRUEBA NO SE SUBE).   →  consola: S3 → ity1102-ep3-…
 
 Qué hace:
-  1. Lee datos/tratado/variables_modelo.csv (la separación train/val/test ya viene hecha por preparar.py).
+  1. Lee datos/tratado/variables_modelo.csv y separa train / validación / prueba ANTES de entrenar:
+       --corte estratificado (por defecto): prueba = 20 % apartado al azar y estratificado por y (random_state=42),
+                                            el resto 75/25 en train y validación  → 60/20/20 con igual tasa de fraude.
+       --corte fecha: el corte temporal de EP2 (columna split de preparar.py).
+     El corte queda en aws/local/corte.json: el paso 04 evalúa exactamente sobre esas filas.
   2. Ajusta el preprocesador SOLO con entrenamiento (el mismo de entrenar.py) y lo guarda en aws/local/.
   3. Genera train.csv y validation.csv ya transformados: columnas  y, etiquetada, x000, x001, ...
      (la prueba se transforma después, en local, en el script 04: nunca sale de tu computador).
@@ -15,7 +19,7 @@ Qué hace:
         s3://<bucket>/fraude-nam/artefactos/preprocesador.joblib
   5. Verifica que en el bucket no haya ningún archivo de prueba.
 
-Uso:  python aws/01_s3_subir_datos.py [--bucket NOMBRE] [--sufijo TEXTO]
+Uso:  python aws/01_s3_subir_datos.py [--corte estratificado|fecha] [--bucket NOMBRE] [--sufijo TEXTO]
 """
 import argparse
 import json
@@ -43,11 +47,12 @@ def exportar_preprocesador(prep, NUM, CAT):
             "relleno_cat": str(imp_c.fill_value)}
 
 
-def generar_csv(tratado, destino):
+def generar_csv(tratado, destino, corte="estratificado"):
     """Escribe train.csv / validation.csv transformados y los archivos de apoyo. Devuelve un resumen."""
     ent = config.importar_entrenar()
     d, NUM, CAT, FEATURES = config.cargar_tratado(tratado)
-    tr, va, te = config.separar(d)
+    tr, va, te = config.separar_corte(d, corte)
+    config.guardar_corte(corte, tr, va, te)
 
     prep = ent.construir_preprocesador(NUM, CAT).fit(tr[FEATURES])           # SOLO con entrenamiento
     nombres = list(prep.get_feature_names_out())
@@ -77,7 +82,7 @@ def generar_csv(tratado, destino):
     archivos["grupos"] = destino / "grupos.json"
     archivos["preprocesador_json"] = destino / "preprocesador.json"
     archivos["preprocesador"] = config.LOCAL / "preprocesador.joblib"
-    resumen = {"n_entrada": len(nombres), "n_factores": len(grupos),
+    resumen = {"corte": corte, "n_entrada": len(nombres), "n_factores": len(grupos),
                "filas": {"train": len(tr), "validation": len(va), "test (NO se sube)": len(te)},
                "fraudes": {"train": int(tr["y"].sum()), "validation": int(va["y"].sum()), "test (NO se sube)": int(te["y"].sum())}}
     return archivos, resumen
@@ -110,12 +115,14 @@ def asegurar_bucket(s3, nombre, region):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tratado", type=Path, default=config.TRATADO)
+    ap.add_argument("--corte", choices=("estratificado", "fecha"), default="estratificado",
+                    help="cómo se aparta la prueba (por defecto estratificado, como pide la guía)")
     ap.add_argument("--bucket", help=f"nombre completo (por defecto {config.PREFIJO_BUCKET}-<id de cuenta>)")
     ap.add_argument("--sufijo", help="reemplaza al id de cuenta en el nombre del bucket")
     args = ap.parse_args(argv)
 
     print("1/3 Preparando CSV locales (preprocesador ajustado solo con entrenamiento)...")
-    archivos, resumen = generar_csv(args.tratado, config.LOCAL / "s3")
+    archivos, resumen = generar_csv(args.tratado, config.LOCAL / "s3", args.corte)
     print("   ", json.dumps(resumen, ensure_ascii=False))
 
     sess = config.sesion()
@@ -140,7 +147,7 @@ def main(argv=None):
     if any("test" in k.lower() or "prueba" in k.lower() for k in claves):
         sys.exit(f"ERROR: hay archivos de prueba en el bucket: {[k for k in claves if 'test' in k.lower() or 'prueba' in k.lower()]}")
 
-    config.guardar_estado(region=region, bucket=bucket, prefijo_s3=p, n_entrada=resumen["n_entrada"])
+    config.guardar_estado(region=region, bucket=bucket, prefijo_s3=p, n_entrada=resumen["n_entrada"], corte=args.corte)
     print(f"\nListo. Revisa en la consola: S3 → {bucket} → {p}/")
     return 0
 
