@@ -1,12 +1,6 @@
-# Dependencias del pipeline (entrenamiento + tests). Se instalan SOLO en CI.
-# Incluye las del servicio para que el modelo se entrene con las mismas versiones que lo sirven.
+# Dependencias del pipeline (tratamiento de datos + tests). Se instalan SOLO en CI.
+# Incluye las del servicio para probar con las mismas versiones que lo ejecutan.
 -r servicio-ia/requirements.txt
-
-# Entrenamiento y exportación a ONNX
-# numpy debe ser <2.1 (TensorFlow 2.18 lo exige); por eso se fija 2.0.2 en ambos archivos.
-tensorflow==2.18.0
-tf2onnx==1.16.1
-onnx==1.17.0
 
 # Tests
 pytest==8.3.3

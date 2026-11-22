@@ -1,0 +1,9 @@
+# Para ejecutar los scripts 01-04 en tu computador (el entrenamiento corre en SageMaker, no aquí).
+# Mismas versiones que servicio-ia/requirements.txt para que el preprocesador sea idéntico.
+boto3
+numpy==2.0.2
+pandas==2.2.3
+scikit-learn==1.9.1
+joblib==1.4.2
+# Opcional: resuelve solo la URI del contenedor de TensorFlow (versión 2.x del SDK). Sin él se usa el patrón estándar.
+# sagemaker<3

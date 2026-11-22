@@ -1,0 +1,44 @@
+# compose.aws.yaml · lo que cambia en la EC2 respecto a compose.yaml (EP3).
+#   docker compose -f compose.yaml -f compose.aws.yaml up -d
+# Agrega Caddy con HTTPS (único servicio con puertos publicados: 80 y 443), quita el 8080 del gateway
+# y manda los logs de los servicios a CloudWatch Logs (grupo /kipu/ep3). Las credenciales para CloudWatch y
+# SageMaker las da el perfil LabInstanceProfile de la EC2: no hay claves de AWS en ningún archivo.
+x-cloudwatch: &cloudwatch
+  driver: awslogs
+  options:
+    awslogs-region: ${AWS_REGION:-us-east-1}
+    awslogs-group: /kipu/ep3
+    awslogs-create-group: "true"
+    tag: "{{.Name}}"                         # un log stream por contenedor: dominio, ia-1, ia-2, worker-llm...
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"                              # Let's Encrypt valida por HTTP y Caddy redirige a HTTPS
+      - "443:443"
+    environment:
+      DOMINIO: ${DOMINIO:?falta DOMINIO en el .env (por ejemplo 3-85-10-20.sslip.io)}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-datos:/data                    # el certificado sobrevive a los reinicios (sin pedir uno nuevo cada vez)
+    depends_on:
+      gateway: { condition: service_healthy }
+    cpus: 0.25
+    mem_limit: 64m
+    restart: unless-stopped
+    logging: *cloudwatch
+    networks: [interna]
+
+  gateway:
+    ports: !reset []                         # en AWS el 8080 no se publica: se entra solo por Caddy (HTTPS)
+    logging: *cloudwatch
+  dominio:
+    logging: *cloudwatch
+  worker-llm:
+    logging: *cloudwatch
+  ia:
+    logging: *cloudwatch
+
+volumes:
+  caddy-datos:

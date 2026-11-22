@@ -33,11 +33,23 @@
   .aviso{background:#fff7e6;border:1px solid #f3d19c;border-radius:7px;padding:8px;font-size:13px;margin-top:10px}
   .error{background:#fdecec;border:1px solid #f5b5b5;border-radius:7px;padding:8px;font-size:13px}
   .vacio{color:#8a94a3}
+  .clave{display:flex;gap:6px;align-items:center} .clave input{width:200px;padding:5px 8px;font-size:13px} .clave button{padding:5px 10px;font-size:13px}
+  .llm{background:#eef4ff;border:1px solid #c5d8fb;border-radius:7px;padding:10px;margin-top:12px;font-size:14px}
+  .llm.degradado{background:#fff7e6;border-color:#f3d19c} .llm small{display:block;color:var(--mut);margin-bottom:4px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:12px}
+  .kpi{background:#f6f8fb;border-radius:8px;padding:10px} .kpi b{display:block;font-size:22px} .kpi span{font-size:12px;color:var(--mut)}
+  .dias{display:flex;align-items:flex-end;gap:6px;height:90px;border-bottom:1px solid var(--line);margin:6px 0 4px}
+  .dia{flex:1;max-width:46px;background:var(--blo);opacity:.75;border-radius:4px 4px 0 0;min-height:2px}
+  .etq{display:flex;gap:6px} .etq span{flex:1;max-width:46px;font-size:11px;color:var(--mut);text-align:center}
+  .pill{font-size:11px;padding:2px 7px;border-radius:99px;background:#eef1f6}
+  .pill.listo{background:#e5f4e4} .pill.degradado{background:#fbebeb} .pill.pendiente{background:#f9eeda}
 </style>
 </head>
 <body>
 <header>
-  <div><h1>Guardián Centinela</h1><small>Kipu Pagos · detección de fraude en línea · EP2</small></div>
+  <div><h1>Guardián Centinela</h1><small>Kipu Pagos · detección de fraude en línea · EP3 (SageMaker + LLM)</small></div>
+  <div class="clave"><input id="clave" type="password" placeholder="Clave de API (X-API-Key)" autocomplete="off">
+    <button type="button" class="sec" id="guardarClave">Usar clave</button></div>
   <div class="chips" id="chips"><span class="chip">cargando…</span></div>
 </header>
 <main>
@@ -79,8 +91,24 @@
   </section>
   <section class="card" id="resultado">
     <h2>Resultado</h2>
-    <p class="vacio">Complete el formulario y presione <b>Evaluar</b>. El dominio consulta la base (usuario, dispositivo, lista negra),
-      llama al modelo a través del gateway y registra la decisión.</p>
+    <p class="vacio">Ingrese la clave de API arriba, complete el formulario y presione <b>Evaluar</b>. El dominio consulta la base
+      (usuario, dispositivo, lista negra), llama al modelo en SageMaker y registra la decisión. Si queda para revisar o bloquear,
+      el resumen para el analista lo redacta el LLM por la cola y aparece aquí cuando está listo.</p>
+  </section>
+  <section class="card wide" id="panel">
+    <h2>Dashboard · Kipu Pagos</h2>
+    <div class="kpis" id="kpis"><div class="kpi vacio">sin datos (falta la clave)</div></div>
+    <div class="fila" style="align-items:start">
+      <div><h2 style="margin-top:6px">Tasa de bloqueo por día (RF12)</h2><div class="dias" id="dias"></div><div class="etq" id="etq"></div></div>
+      <div><h2 style="margin-top:6px">Distribución de decisiones</h2><div id="distribucion" class="vacio">—</div></div>
+    </div>
+  </section>
+  <section class="card wide">
+    <h2>Cola de revisión · priorizada por pérdida esperada (probabilidad × monto)</h2>
+    <div style="overflow-x:auto"><table>
+      <thead><tr><th>#</th><th>Decisión</th><th>Prob.</th><th>Monto USD</th><th>Pérdida esperada</th><th>Resumen para el analista (LLM)</th></tr></thead>
+      <tbody id="revision"><tr><td colspan="6" class="vacio">sin datos</td></tr></tbody>
+    </table></div>
   </section>
   <section class="card wide">
     <h2>Últimas decisiones registradas <small id="resumen" class="vacio"></small></h2>
@@ -91,26 +119,34 @@
   </section>
 </main>
 <script>
-const API = "/api/dominio";
+const API = "/api";
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+// La clave NO está en el código: el usuario la ingresa y queda solo en esta pestaña (sessionStorage).
+// El navegador nunca llama al LLM: el resumen lo pide el worker por la cola.
+const clave = () => { try { return sessionStorage.getItem("clave") || ""; } catch { return ""; } };
+$("clave").value = clave();
+$("guardarClave").onclick = () => { try { sessionStorage.setItem("clave", $("clave").value.trim()); } catch {} usuarios(); refrescar(); };
 
 async function api(path, opts) {
-  const r = await fetch(API + path, {headers: {"Content-Type": "application/json"}, ...opts});
+  const r = await fetch(API + path, {...opts, headers: {"Content-Type": "application/json", "X-API-Key": clave()}});
   const t = await r.text(); let b; try { b = JSON.parse(t); } catch { b = {detail: t}; }
   if (!r.ok) throw Object.assign(new Error(typeof b.detail === "string" ? b.detail : JSON.stringify(b.detail || b)), {status: r.status});
   return b;
 }
 
 async function estado() {
-  const chips = [];
-  for (const [n, url] of [["gateway", "/health"], ["dominio", "/api/dominio/health"], ["ia", "/api/ia/health"]]) {
-    try { const r = await fetch(url); const b = await r.json().catch(() => ({}));
-      const rep = n === "ia" && r.headers.get("X-Upstream") ? " · " + r.headers.get("X-Upstream") : "";
-      chips.push(`<span class="chip ${r.ok ? "ok" : "err"}">${n}${rep}${b.version_modelo ? " · modelo " + esc(b.version_modelo) : ""}</span>`);
-    } catch { chips.push(`<span class="chip err">${n} caído</span>`); }
-  }
-  $("chips").innerHTML = chips.join("");
+  // GET /api/health es público: estado separado de base, SageMaker, cola y LLM
+  try {
+    const r = await fetch(API + "/health"); const b = await r.json();
+    const p = b.piezas || {};
+    $("chips").innerHTML = Object.entries(p).map(([n, x]) => {
+      const extra = n === "sagemaker" && x.version_modelo ? " · modelo " + esc(x.version_modelo)
+                  : n === "cola" && x.pendientes != null ? ` · ${x.pendientes} pend. · ${x.fallidos} fallidos`
+                  : x.detalle ? " · " + esc(x.detalle) : "";
+      return `<span class="chip ${x.estado === "ok" ? "ok" : "err"}" title="${esc(JSON.stringify(x))}">${n}: ${esc(x.estado)}${extra}</span>`;
+    }).join("");
+  } catch { $("chips").innerHTML = `<span class="chip err">dominio caído</span>`; }
 }
 
 async function usuarios() {
@@ -148,15 +184,74 @@ function pintar(r) {
       <div>Latencia total<b>${esc(r.latencia_ms)} ms</b></div>
       <div>Desglose<b>BD ${r.desglose_ms?.base_de_datos} · IA ${r.desglose_ms?.ia} ms</b></div>
     </div>
-    <p style="font-size:13px"><a href="${API}/predicciones/${encodeURIComponent(r.transaccion_id)}" target="_blank" rel="noopener">Reproducir esta decisión (RF7, auditoría)</a></p>`;
+    <div id="llm">${cajaLLM(r)}</div>
+    <p style="font-size:13px">Auditoría (RF7): <code>GET ${API}/predicciones?transaccion_id=${esc(r.transaccion_id)}</code></p>`;
 }
 
-async function evaluar(p) {
-  $("btn").disabled = true;
-  try { pintar(await api("/evaluar", {method: "POST", body: JSON.stringify(p)})); }
-  catch (e) { $("resultado").innerHTML = `<h2>Resultado</h2><div class="error"><b>Error ${esc(e.status || "")}</b>: ${esc(e.message)}</div>`; }
-  finally { $("btn").disabled = false; tabla(); estado(); }
+function cajaLLM(r) {
+  if (r.estado_llm === "no_aplica") return "";
+  if (r.estado_llm === "listo") return `<div class="llm"><small>Resumen para el analista (LLM)</small>${esc(r.resumen_llm)}</div>`;
+  if (r.estado_llm === "degradado") return `<div class="llm degradado"><small>Modo degradado</small>
+    Resumen no disponible (${esc(r.motivo_llm || "LLM no disponible")}). La decisión y las razones del modelo siguen vigentes.</div>`;
+  return `<div class="llm"><small>Resumen para el analista (LLM)</small><span class="vacio">El LLM está redactando el resumen…</span></div>`;
 }
+
+// El resumen llega después por la cola: se consulta GET /api/predicciones/{id} hasta que esté listo o degradado
+async function esperarLLM(id, intentos = 40) {
+  for (let i = 0; i < intentos; i++) {
+    await new Promise(ok => setTimeout(ok, 1500));
+    try {
+      const g = await api(`/predicciones/${id}`);
+      if (g.estado_llm !== "pendiente") { if ($("llm")) $("llm").innerHTML = cajaLLM(g); revision(); return; }
+    } catch { return; }
+  }
+}
+
+async function evaluar(p, conLLM = true) {
+  $("btn").disabled = true;
+  try {
+    const r = await api("/predict", {method: "POST", body: JSON.stringify(p)});
+    pintar(r);
+    if (conLLM && r.estado_llm === "pendiente") esperarLLM(r.id);
+  }
+  catch (e) { $("resultado").innerHTML = `<h2>Resultado</h2><div class="error"><b>Error ${esc(e.status || "")}</b>: ${esc(e.message)}</div>`; }
+  finally { $("btn").disabled = false; refrescar(); }
+}
+
+async function dashboard() {
+  try {
+    const d = await api("/dashboard");
+    const n = Object.fromEntries((d.decisiones || []).map(x => [x.decision, x.n]));
+    const total = d.transacciones_evaluadas || 0;
+    const pct = k => total ? Math.round(1000 * (n[k] || 0) / total) / 10 : 0;
+    const llm = Object.fromEntries((d.estado_llm || []).map(x => [x.estado_llm, x.n]));
+    $("kpis").innerHTML = [
+      ["Transacciones evaluadas", total.toLocaleString("es-CL")],
+      ["Aprobadas", `${pct("aprobar")}%`], ["A revisar", `${pct("revisar")}%`], ["Bloqueadas", `${pct("bloquear")}%`],
+      ["En cola de revisión", (d.en_cola_de_revision || 0).toLocaleString("es-CL")],
+      ["Resúmenes LLM listos / degradados", `${llm.listo || 0} / ${llm.degradado || 0}`],
+    ].map(([t, v]) => `<div class="kpi"><b>${esc(v)}</b><span>${esc(t)}</span></div>`).join("");
+    const dias = (d.bloqueo_por_dia || []).slice(0, 14).reverse();
+    const max = Math.max(1, ...dias.map(x => Number(x.tasa_bloqueo_pct)));
+    $("dias").innerHTML = dias.map(x => `<div class="dia" style="height:${Math.max(2, 100 * x.tasa_bloqueo_pct / max)}%"
+      title="${esc(x.dia)}: ${x.tasa_bloqueo_pct}% bloqueadas (${x.bloqueadas} de ${x.evaluadas})"></div>`).join("") || `<span class="vacio">sin datos</span>`;
+    $("etq").innerHTML = dias.map(x => `<span>${esc(String(x.dia).slice(5))}<br>${x.tasa_bloqueo_pct}%</span>`).join("");
+    $("distribucion").innerHTML = ["aprobar", "revisar", "bloquear"].map(k => `<div style="margin:6px 0"><b class="${k}">${k}</b> · ${n[k] || 0}
+      <div class="barra"><div style="width:${pct(k)}%;background:var(--${k === "aprobar" ? "ok" : k === "revisar" ? "rev" : "blo"})"></div></div></div>`).join("");
+  } catch (e) { $("kpis").innerHTML = `<div class="kpi vacio">${e.status === 401 ? "Ingrese la clave de API" : "sin datos"}</div>`; }
+}
+
+async function revision() {
+  try {
+    const f = await api("/revision?limit=15");
+    $("revision").innerHTML = f.length ? f.map(x => `<tr><td>${x.id}</td><td class="${esc(x.decision)}"><b>${esc(x.decision)}</b></td>
+      <td>${x.probabilidad ?? "reserva"}</td><td>${x.monto_usd == null ? "—" : Number(x.monto_usd).toFixed(2)}</td><td>${x.perdida_esperada_usd == null ? "—" : Number(x.perdida_esperada_usd).toFixed(2)}</td>
+      <td>${x.estado_llm === "listo" ? esc(x.resumen_llm) : `<span class="pill ${esc(x.estado_llm)}">${esc(x.estado_llm)}</span> ${esc(x.motivo_llm || "")}`}</td></tr>`).join("")
+      : `<tr><td colspan="6" class="vacio">La cola de revisión está vacía</td></tr>`;
+  } catch { /* sin clave o dominio caído */ }
+}
+
+function refrescar() { tabla(); estado(); dashboard(); revision(); }
 
 async function tabla() {
   try {
@@ -175,8 +270,8 @@ $("normal").onclick = () => { $("monto").value = 18500; $("moneda").value = "CLP
   $("pais_transaccion").value = "CL"; $("intentos_previos_1h").value = 0; $("ip").value = "186.10.20.30"; };
 $("sospechoso").onclick = () => { $("monto").value = 250; $("moneda").value = "USD"; $("canal").value = "api"; $("mcc").value = "7995";
   $("pais_transaccion").value = "NG"; $("intentos_previos_1h").value = 12; $("ip").value = ""; };
-$("carga").onclick = async () => { const p = payload(); for (let i = 0; i < 30; i++) await evaluar(p); };
-usuarios(); estado(); tabla(); setInterval(() => { tabla(); estado(); }, 5000);
+$("carga").onclick = async () => { const p = payload(); for (let i = 0; i < 30; i++) await evaluar(p, false); };
+usuarios(); refrescar(); setInterval(refrescar, 5000);
 </script>
 </body>
 </html>

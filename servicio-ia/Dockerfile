@@ -1,12 +1,15 @@
 # Contexto de build = RAÍZ del repositorio (necesita datos/preparar.py, que comparte con el entrenamiento):
 #   docker build -f servicio-ia/Dockerfile -t servicio-ia .
-# Antes hay que generar el modelo:  python datos/preparar.py && python servicio-ia/entrenar.py
+# EP3: la imagen NO contiene el modelo. Invoca el endpoint de SageMaker con boto3 (sin claves: credenciales del
+# perfil de la instancia EC2). Los umbrales de decisión son configuración (servicio-ia/config/umbrales.json).
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    AWS_REGION=us-east-1 \
+    SAGEMAKER_ENDPOINT=kipu-fraude-ep3
 
 WORKDIR /app
 
@@ -17,10 +20,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 COPY servicio-ia/requirements.txt .
 RUN pip install -r requirements.txt
 
-# Código, tratamiento compartido con el entrenamiento y modelo exportado (sin datos crudos ni secretos)
+# Código, tratamiento compartido con el entrenamiento y umbrales (sin modelo, sin datos crudos, sin secretos)
 COPY datos/preparar.py ./preparar.py
 COPY servicio-ia/main.py .
-COPY servicio-ia/model/ ./model/
+COPY servicio-ia/config/ ./config/
 
 # No corre como root
 RUN useradd --system --uid 10001 --no-create-home app
