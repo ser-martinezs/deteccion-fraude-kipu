@@ -14,6 +14,14 @@ from fastapi.testclient import TestClient
 import main
 from main import Transaccion, politica_reserva
 
+H = {"X-API-Key": "clave-de-prueba"}
+
+
+@pytest.fixture(autouse=True)
+def clave(monkeypatch):
+    monkeypatch.setattr(main, "CLAVES_API", ["clave-de-prueba"])
+    monkeypatch.setattr(main, "publicar_en_cola", lambda m: None)   # sin RabbitMQ en el pipeline
+
 BASE = {"usuario_id": "KP301626", "comercio_id": "CM40294", "monto": 25000, "moneda": "CLP", "canal": "app",
         "mcc": "5411", "pais_transaccion": "cl"}
 
@@ -52,12 +60,12 @@ def ia_caida(request: httpx.Request) -> httpx.Response:
 def test_evaluar_guarda_la_prediccion(monkeypatch):
     monkeypatch.setattr(main, "http", httpx.Client(transport=httpx.MockTransport(ia_simulada)))
     with TestClient(main.app) as c:
-        assert c.get("/health").status_code == 200
-        r = c.post("/evaluar", json=BASE)
+        assert c.get("/vivo").status_code == 200
+        r = c.post("/evaluar", json=BASE, headers=H)
         assert r.status_code == 200, r.text
         b = r.json()
         assert b["decision"] == "revisar" and b["origen"] == "modelo" and b["version_modelo"] == "test"
-        guardada = c.get(f"/predicciones/{b['transaccion_id']}").json()
+        guardada = c.get("/predicciones", params={"transaccion_id": b["transaccion_id"]}, headers=H).json()
         assert guardada[0]["version_modelo"] == "test"          # RF7: se puede reproducir
 
 
@@ -65,5 +73,5 @@ def test_evaluar_guarda_la_prediccion(monkeypatch):
 def test_ia_caida_aplica_politica_de_reserva(monkeypatch):
     monkeypatch.setattr(main, "http", httpx.Client(transport=httpx.MockTransport(ia_caida)))
     with TestClient(main.app) as c:
-        b = c.post("/evaluar", json=BASE).json()
+        b = c.post("/evaluar", json=BASE, headers=H).json()
         assert b["origen"] == "reserva" and b["decision"] in ("aprobar", "revisar", "bloquear")
