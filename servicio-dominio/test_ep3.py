@@ -6,7 +6,7 @@ Obligatorias de la sección 4.3 del enunciado:
   3. Sin X-API-Key -> 401
   5. RUT, correo, teléfono y tarjeta pasados por la anonimización: ninguno sobrevive
   6. LLM con 429 o caído -> la predicción responde igual y el estado queda en modo degradado
-(La 4, ráfaga sobre el límite -> 429, se prueba en el gateway.)
+  4. Ráfaga sobre el límite de solicitudes -> 429
 
 La IA (SageMaker) y NVIDIA se simulan: el pipeline no necesita AWS ni la clave de NVIDIA.
 """
@@ -31,6 +31,7 @@ requiere_db = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="sin base
 @pytest.fixture(autouse=True)
 def clave(monkeypatch):
     monkeypatch.setattr(main, "CLAVES_API", [CLAVE])
+    monkeypatch.setattr(main, "limitador", main.LimitadorPorMinuto())    # cada prueba parte con el contador en cero
 
 
 def ia_que_decide(decision, prob=0.41):
@@ -80,6 +81,31 @@ def test_2_entrada_invalida_responde_422_con_detalle(cambio):
     assert r.status_code == 422
     detalle = r.json()["detail"]
     assert isinstance(detalle, list) and detalle[0]["loc"] and detalle[0]["msg"]
+
+
+def test_campo_tarjeta_con_numero_completo_responde_422():
+    """RNF5: un campo fuera del contrato (aquí el número de tarjeta) no se ignora en silencio: 422."""
+    with TestClient(main.app) as c:
+        r = c.post("/predict", json={**BASE, "tarjeta": "4111111111111111"}, headers=H)
+    assert r.status_code == 422 and "tarjeta" in r.text
+
+
+# ------------------------------------------------------------------ 4 · ráfaga sobre el límite -> 429
+def test_4_rafaga_sobre_el_limite_responde_429(monkeypatch):
+    monkeypatch.setattr(main, "LIMITE_POR_MINUTO", 5)
+    with TestClient(main.app) as c:
+        # cuerpo inválido a propósito: el límite se evalúa antes y la prueba no necesita base ni IA
+        codigos = [c.post("/predict", json={}, headers=H).status_code for _ in range(8)]
+        otro_cliente = c.post("/predict", json={}, headers={**H, "X-Forwarded-For": "200.1.2.3"}).status_code
+    assert codigos[:5] == [422] * 5 and codigos[5:] == [429] * 3
+    assert otro_cliente == 422                                   # el límite es por cliente, no global
+
+
+def test_limitador_libera_despues_de_un_minuto():
+    lim = main.LimitadorPorMinuto()
+    assert all(lim.permitir("a", 2, ahora=t) for t in (0, 1))
+    assert not lim.permitir("a", 2, ahora=30)
+    assert lim.permitir("a", 2, ahora=61)
 
 
 def test_pan_completo_responde_422():
@@ -145,7 +171,9 @@ def test_6_cola_caida_la_prediccion_responde_igual_en_modo_degradado(monkeypatch
         assert r.status_code == 200, r.text
         b = r.json()
         assert b["decision"] == "revisar" and b["estado_llm"] == "degradado" and b["version_modelo"] == "3.0.0-test"
-        assert c.get(f"/predicciones/{b['prediccion_id']}", headers=H).json()["estado_llm"] == "degradado"
+        assert "ConnectionError" in b["motivo_llm"]
+        g = c.get(f"/predicciones/{b['id']}", headers=H).json()
+        assert g["estado_llm"] == "degradado" and "cola" in g["motivo_llm"]
 
 
 # ------------------------------------------------------------------ 1 · predicción válida -> 200 con versión
@@ -183,11 +211,29 @@ def test_worker_guarda_el_resumen_y_el_estado_del_llm(monkeypatch):
     with TestClient(main.app) as c:
         pid = c.post("/predict", json=BASE, headers=H).json()["prediccion_id"]
         monkeypatch.setattr(worker, "cliente", lambda: LLMFalso(texto="Monto inusual: revisar historial"))
+        fallidos = []
         with psycopg.connect(os.environ["DATABASE_URL"]) as con:
-            assert worker.procesar(con, f'{{"prediccion_id": {pid}}}'.encode()) == "listo"
+            assert worker.procesar(con, f'{{"prediccion_id": {pid}}}'.encode(), fallidos.append) == "listo"
         g = c.get(f"/predicciones/{pid}", headers=H).json()
-        assert g["estado_llm"] == "listo" and g["resumen_llm"] == "Monto inusual: revisar historial"
+        assert g["estado_llm"] == "listo" and g["resumen_llm"] == "Monto inusual: revisar historial" and fallidos == []
         assert c.get("/health").json()["piezas"]["llm"]["estado"] == "ok"
+
+
+@requiere_db
+def test_6_worker_con_clave_invalida_deja_motivo_y_mensaje_en_fallidos(monkeypatch):
+    import psycopg
+    monkeypatch.setattr(main, "http", ia_que_decide("bloquear", 0.97))
+    monkeypatch.setattr(main, "publicar_en_cola", lambda m: None)
+    with TestClient(main.app) as c:
+        pid = c.post("/predict", json=BASE, headers=H).json()["id"]
+        monkeypatch.setattr(worker, "cliente", lambda: LLMFalso([error_openai(openai.AuthenticationError, 401)]))
+        fallidos = []
+        with psycopg.connect(os.environ["DATABASE_URL"]) as con:
+            assert worker.procesar(con, f'{{"prediccion_id": {pid}}}'.encode(), fallidos.append) == "degradado"
+        g = c.get(f"/predicciones/{pid}", headers=H).json()
+        assert g["estado_llm"] == "degradado" and "401" in g["motivo_llm"] and g["decision"] == "bloquear"
+        assert len(fallidos) == 1
+        assert c.get("/health").json()["piezas"]["llm"]["estado"] == "degradado"
 
 
 @requiere_db
@@ -198,8 +244,8 @@ def test_revision_ordenada_por_riesgo_y_monto(monkeypatch):
             monkeypatch.setattr(main, "http", ia_que_decide("revisar", prob))
             assert c.post("/predict", json={**BASE, "monto": monto}, headers=H).status_code == 200
         filas = c.get("/revision", headers=H).json()
-    claves = [(f["probabilidad"], float(f["monto_usd"])) for f in filas]
-    assert claves == sorted(claves, key=lambda x: (-x[0], -x[1]))
+    perdidas = [float(f["perdida_esperada_usd"]) for f in filas if f["perdida_esperada_usd"] is not None]
+    assert perdidas == sorted(perdidas, reverse=True) and len(perdidas) >= 3
 
 
 @requiere_db

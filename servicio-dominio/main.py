@@ -10,7 +10,8 @@ Es el ÚNICO servicio que lee y escribe la base de datos. Para evaluar una trans
      si la cola no está disponible, la predicción responde igual y queda en modo degradado.
 
 Detrás del gateway, /api/... llega aquí sin el prefijo (ROOT_PATH=/api para que /docs muestre las rutas completas).
-Todas las rutas de negocio exigen la cabecera X-API-Key (401 sin ella). /health, /vivo y /docs son públicas.
+Todas las rutas de negocio exigen la cabecera X-API-Key (401 sin ella) y tienen límite de solicitudes por minuto
+por cliente (429 al pasarlo). /health, /vivo y /docs son públicas.
 """
 from __future__ import annotations
 
@@ -19,15 +20,17 @@ import logging
 import os
 import re
 import secrets
+import threading
 import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
 import httpx
 import pika
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -45,6 +48,9 @@ POLITICA_RESERVA = os.getenv("POLITICA_RESERVA", "reglas")        # reglas | apr
 TIPO_CAMBIO_CLP_USD = float(os.getenv("TIPO_CAMBIO_CLP_USD", "950"))   # supuesto del equipo (el caso no lo entrega)
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/%2F")
 COLA_LLM = os.getenv("COLA_LLM", "resumenes_llm")
+COLA_FALLIDOS = f"{COLA_LLM}.fallidos"                          # los pedidos que quedaron en modo degradado
+# Rate limiting (EP3 §2.5): solicitudes por minuto por cliente (clave + IP). Se sube en el .env para la prueba de Locust
+LIMITE_POR_MINUTO = int(os.getenv("LIMITE_POR_MINUTO", "3000"))
 CLAVES_API = [c.strip() for c in os.getenv("API_KEYS", "").split(",") if c.strip()]
 PAN_RE = re.compile(r"\d{13,19}")
 
@@ -79,7 +85,38 @@ def requiere_clave(x_api_key: Optional[str] = Header(default=None, description="
         raise HTTPException(401, "Falta la cabecera X-API-Key o la clave no es válida")
 
 
-protegida = [Depends(requiere_clave)]
+class LimitadorPorMinuto:
+    """Ventana deslizante de 60 s en memoria, por cliente. Basta con un proceso de uvicorn por contenedor."""
+    def __init__(self):
+        self._hits: dict[str, deque] = {}
+        self._lock = threading.Lock()
+
+    def permitir(self, cliente: str, limite: int, ahora: float | None = None) -> bool:
+        ahora = time.monotonic() if ahora is None else ahora
+        with self._lock:
+            q = self._hits.setdefault(cliente, deque())
+            while q and ahora - q[0] >= 60:
+                q.popleft()
+            if len(q) >= limite:
+                return False
+            q.append(ahora)
+            return True
+
+
+limitador = LimitadorPorMinuto()
+
+
+def limite_de_solicitudes(request: Request, x_api_key: Optional[str] = Header(default=None, include_in_schema=False)):
+    """429 si el cliente pasa LIMITE_POR_MINUTO. La IP real llega en X-Forwarded-For desde Caddy y el gateway."""
+    ip = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "?")).split(",")[0].strip()
+    if not limitador.permitir(f"{x_api_key}|{ip}", LIMITE_POR_MINUTO):
+        log.warning("rate_limit cliente_ip=%s limite_por_minuto=%d", ip, LIMITE_POR_MINUTO)
+        raise HTTPException(429, f"Demasiadas solicitudes: el límite es {LIMITE_POR_MINUTO} por minuto",
+                            headers={"Retry-After": "60"})
+
+
+# Primero la clave (401) y después el límite (429)
+protegida = [Depends(requiere_clave), Depends(limite_de_solicitudes)]
 
 
 # ------------------------------------------------------------------ contrato de entrada
@@ -98,7 +135,8 @@ class Transaccion(BaseModel):
     intentos_previos_1h: Optional[int] = Field(default=None, ge=0, le=100)
     timestamp: Optional[datetime] = None
 
-    model_config = {"json_schema_extra": {"examples": [{
+    # extra="forbid": un campo que no está en el contrato (por ejemplo "tarjeta" con el número completo) -> 422 (RNF5)
+    model_config = {"extra": "forbid", "json_schema_extra": {"examples": [{
         "usuario_id": "KP301626", "comercio_id": "CM40294", "monto": 25000, "moneda": "CLP",
         "canal": "app", "mcc": "5411", "pais_transaccion": "CL"}]}}
 
@@ -176,14 +214,14 @@ def publicar_en_cola(mensaje: dict) -> None:
         con.close()
 
 
-def encolar_resumen(prediccion: dict) -> str:
-    """Devuelve el estado_llm con que queda la predicción: pendiente si se encoló, degradado si la cola falló."""
+def encolar_resumen(prediccion: dict) -> tuple[str, Optional[str]]:
+    """Devuelve (estado_llm, motivo): pendiente si se encoló; degradado con el motivo si la cola falló."""
     try:
         publicar_en_cola(mensaje_para_llm(prediccion))
-        return "pendiente"
+        return "pendiente", None
     except Exception as e:  # noqa: BLE001  (cualquier falla de la cola deja la predicción en modo degradado)
         log.warning("cola_no_disponible prediccion_id=%s error=%s", prediccion["prediccion_id"], e.__class__.__name__)
-        return "degradado"
+        return "degradado", f"cola: {e.__class__.__name__}"
 
 
 # ------------------------------------------------------------------ salud
@@ -225,10 +263,12 @@ def _salud_cola() -> dict:
         params.connection_attempts = 1
         con = pika.BlockingConnection(params)
         try:
-            pendientes = con.channel().queue_declare(queue=COLA_LLM, durable=True).method.message_count
+            canal = con.channel()
+            pendientes = canal.queue_declare(queue=COLA_LLM, durable=True).method.message_count
+            fallidos = canal.queue_declare(queue=COLA_FALLIDOS, durable=True).method.message_count
         finally:
             con.close()
-        return {"estado": "ok", "mensajes_en_cola": pendientes}
+        return {"estado": "ok", "pendientes": pendientes, "fallidos": fallidos}
     except Exception as e:  # noqa: BLE001
         return {"estado": "caido", "detalle": e.__class__.__name__}
 
@@ -314,23 +354,23 @@ def predict(t: Transaccion):
         reg = cur.fetchone()
         con.commit()
 
-        respuesta = {"prediccion_id": reg["prediccion_id"], "transaccion_id": tx_id, "decision": decision,
+        respuesta = {"id": reg["prediccion_id"], "prediccion_id": reg["prediccion_id"], "transaccion_id": tx_id, "decision": decision,
                      "origen": origen, "probabilidad_fraude": prob, "razones": razones, "version_modelo": version_modelo,
                      "version_umbrales": version_umbrales, "usuario_conocido": usuario is not None,
                      "monto_usd": round(monto_usd, 2), "moneda": t.moneda, "canal": t.canal,
-                     "pais_transaccion": t.pais_transaccion, "mcc": t.mcc, "estado_llm": estado_llm,
+                     "pais_transaccion": t.pais_transaccion, "mcc": t.mcc, "estado_llm": estado_llm, "motivo_llm": None,
                      "latencia_ms": round(lat_ms, 2),
                      "desglose_ms": {"base_de_datos": round((t_bd - t0) * 1000, 2), "ia": round((t_ia - t_bd) * 1000, 2)},
                      "fecha_utc": reg["creado_utc"].isoformat()}
 
         # El LLM va por la cola, DESPUÉS de guardar: la decisión ya está tomada y no lo espera
         if estado_llm == "pendiente":
-            estado_llm = encolar_resumen(respuesta)
+            estado_llm, motivo = encolar_resumen(respuesta)
             if estado_llm == "degradado":
-                cur.execute("UPDATE predicciones SET estado_llm = 'degradado', llm_actualizado = now() WHERE prediccion_id = %s",
-                            (reg["prediccion_id"],))
+                cur.execute("""UPDATE predicciones SET estado_llm = 'degradado', motivo_llm = %s, llm_actualizado = now()
+                               WHERE prediccion_id = %s""", (motivo, reg["prediccion_id"]))
                 con.commit()
-            respuesta["estado_llm"] = estado_llm
+            respuesta["estado_llm"], respuesta["motivo_llm"] = estado_llm, motivo
 
     # Una línea por predicción (CloudWatch). Sin tarjeta, nombre, RUT ni IP
     log.info("prediccion prediccion_id=%s transaccion_id=%s decision=%s origen=%s probabilidad=%s version_modelo=%s "
@@ -346,8 +386,9 @@ def evaluar(t: Transaccion):
 
 
 # ------------------------------------------------------------------ consultas
-COLS_PRED = """prediccion_id, transaccion_id, usuario_id, decision, origen, probabilidad, razones, monto_usd,
-               version_modelo, version_umbrales, latencia_ms, estado_llm, resumen_llm, llm_actualizado, creado_utc"""
+COLS_PRED = """prediccion_id AS id, prediccion_id, transaccion_id, usuario_id, decision, origen, probabilidad, razones,
+               monto_usd, version_modelo, version_umbrales, latencia_ms, estado_llm, resumen_llm, motivo_llm,
+               llm_actualizado, creado_utc"""
 
 
 @app.get("/predicciones/{prediccion_id}", dependencies=protegida,
@@ -374,12 +415,14 @@ def predicciones(limit: int = Query(20, ge=1, le=200), transaccion_id: Optional[
 
 
 @app.get("/revision", dependencies=protegida,
-         summary="Cola de revisión priorizada por riesgo y monto, con el resumen del LLM cuando está listo (RF5)")
+         summary="Cola de revisión priorizada por riesgo y monto (pérdida esperada = probabilidad × monto), con el resumen del LLM (RF5)")
 def revision(limit: int = Query(50, ge=1, le=200)):
+    """Primero lo que más dinero pone en riesgo. Las decisiones por reserva (sin probabilidad) van al final, por monto."""
     with pool.connection() as con:
-        return con.execute(f"""SELECT {COLS_PRED} FROM predicciones
+        return con.execute(f"""SELECT {COLS_PRED}, round((probabilidad * monto_usd)::numeric, 2) AS perdida_esperada_usd
+                               FROM predicciones
                                WHERE decision IN ('revisar','bloquear')
-                               ORDER BY probabilidad DESC NULLS LAST, monto_usd DESC NULLS LAST, prediccion_id DESC
+                               ORDER BY probabilidad * monto_usd DESC NULLS LAST, monto_usd DESC NULLS LAST, prediccion_id DESC
                                LIMIT %s""", (limit,)).fetchall()
 
 
