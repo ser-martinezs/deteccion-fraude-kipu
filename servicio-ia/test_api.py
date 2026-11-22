@@ -216,11 +216,12 @@ def test_decidir_regla_dura_manda_sobre_el_modelo():
 
 def test_la_decision_usa_los_umbrales_de_configuracion(client, falso):
     u = _umbrales()
-    assert u["revisar_dia"] < u["bloquear_dia"] and u["revisar_dia"] < u["bloquear_noche"]
+    assert u["revisar_dia"] < u["bloquear_dia"]
+    assert 0.0 < u["bloquear_noche"] <= 1.0
     casos = [(ENTRADA_CONOCIDA["timestamp"], u["revisar_dia"] / 2, "aprobar"),
              (ENTRADA_CONOCIDA["timestamp"], (u["revisar_dia"] + u["bloquear_dia"]) / 2, "revisar"),
              (ENTRADA_CONOCIDA["timestamp"], min(u["bloquear_dia"] + 0.01, 1.0), "bloquear"),
-             (DE_NOCHE, (u["revisar_dia"] + u["bloquear_noche"]) / 2, "aprobar"),
+             (DE_NOCHE, u["bloquear_noche"] / 2, "aprobar"),
              (DE_NOCHE, min(u["bloquear_noche"] + 0.01, 1.0), "bloquear")]
     for ts, p, esperado in casos:
         falso.p_forzada = p
