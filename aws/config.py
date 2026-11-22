@@ -21,6 +21,7 @@ AQUI = Path(__file__).resolve().parent
 RAIZ = AQUI.parent
 RUTA_ESTADO = AQUI / "estado.json"
 LOCAL = AQUI / "local"                      # preprocesador y archivos que NO se suben a S3
+RUTA_CORTE = LOCAL / "corte.json"           # qué filas son validación y prueba (lo escribe el 01, lo leen el 04 y el 05)
 TRATADO = RAIZ / "datos" / "tratado"
 
 # ---------------------------------------------------------------- el caso
@@ -133,3 +134,51 @@ def separar(d):
     if min(len(tr), len(va), len(te)) == 0:
         sys.exit("ERROR: algún conjunto (train/val/test) quedó vacío en variables_modelo.csv")
     return tr, va, te
+
+
+# ---------------------------------------------------------------- corte train / validación / prueba
+SEMILLA_CORTE = 42
+
+
+def separar_corte(d, corte="estratificado", semilla=SEMILLA_CORTE):
+    """'estratificado' (por defecto): la PRUEBA se aparta ANTES de entrenar, al azar y estratificada por y
+         (train_test_split(test_size=0.2, stratify=y, random_state=42)); el 80 % restante se divide 75/25 en entrenamiento
+         y validación, también estratificado. Resultado 60/20/20 con la misma proporción de fraude en cada parte.
+       'fecha': el corte temporal de EP2 (columna split de preparar.py)."""
+    if corte == "fecha":
+        return separar(d)
+    from sklearn.model_selection import train_test_split
+    resto, te = train_test_split(d, test_size=0.2, stratify=d["y"], random_state=semilla)
+    tr, va = train_test_split(resto, test_size=0.25, stratify=resto["y"], random_state=semilla)
+    return tr.copy(), va.copy(), te.copy()
+
+
+def guardar_corte(corte, tr, va, te, semilla=SEMILLA_CORTE):
+    LOCAL.mkdir(parents=True, exist_ok=True)
+    RUTA_CORTE.write_text(json.dumps({
+        "corte": corte, "semilla": semilla if corte == "estratificado" else None,
+        "filas": {"train": len(tr), "validacion": len(va), "prueba": len(te)},
+        "fraudes": {"train": int(tr["y"].sum()), "validacion": int(va["y"].sum()), "prueba": int(te["y"].sum())},
+        "ids_validacion": va["transaccion_id"].tolist(), "ids_prueba": te["transaccion_id"].tolist()}))
+
+
+def cargar_corte(d):
+    """Reconstruye (corte, train, validación, prueba) tal como los dejó el paso 01."""
+    if not RUTA_CORTE.exists():
+        sys.exit("ERROR: falta aws/local/corte.json. Ejecuta antes 01_s3_subir_datos.py.")
+    c = json.loads(RUTA_CORTE.read_text())
+    ids_te, ids_va = set(c["ids_prueba"]), set(c["ids_validacion"])
+    te, va = d[d["transaccion_id"].isin(ids_te)].copy(), d[d["transaccion_id"].isin(ids_va)].copy()
+    tr = d[~d["transaccion_id"].isin(ids_te | ids_va)].copy()
+    if len(te) != len(ids_te) or len(va) != len(ids_va):
+        sys.exit("ERROR: los datos de datos/tratado cambiaron desde el paso 01 (faltan ids del corte). Vuelve a ejecutarlo.")
+    return c["corte"], tr, va, te
+
+
+def importar_script(nombre):
+    """Importa otro script numerado de esta carpeta (p. ej. '04_invocar_y_metricas') para reutilizar sus funciones."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(nombre, AQUI / f"{nombre}.py")
+    modulo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(modulo)
+    return modulo
