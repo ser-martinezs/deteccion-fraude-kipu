@@ -44,22 +44,66 @@ services:
     networks: [interna]
 
   dominio:
-    image: ghcr.io/ser-martinezs/servicio-dominio:ep2
+    image: ghcr.io/ser-martinezs/servicio-dominio:ep3
     environment:
       DATABASE_URL: postgresql://kipu:${POSTGRES_PASSWORD:-kipu_local}@db:5432/kipu
-      IA_URL: http://gateway:8080/api/ia     # la IA se consume a través del gateway (balanceo entre réplicas)
-      IA_TIMEOUT_MS: ${IA_TIMEOUT_MS:-500}
+      IA_URL: http://ia:8000                 # red interna: la ruta de IA ya no pasa por el gateway público
+      IA_TIMEOUT_MS: ${IA_TIMEOUT_MS:-6000}  # > SAGEMAKER_READ_TIMEOUT_S (5 s) para que el cold start alcance a responder
       POLITICA_RESERVA: ${POLITICA_RESERVA:-reglas}
+      API_KEYS: ${API_KEYS:?falta API_KEYS en el .env}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-kipu}:${RABBITMQ_PASSWORD:-kipu_local}@rabbitmq:5672/%2F
+      ROOT_PATH: /api                        # el gateway quita /api: así /docs muestra las rutas completas
+      LIMITE_POR_MINUTO: ${LIMITE_POR_MINUTO:-3000}   # rate limiting por cliente (429); subirlo solo para Locust
     depends_on:
-      db:    { condition: service_healthy }
-      carga: { condition: service_completed_successfully }
+      db:       { condition: service_healthy }
+      carga:    { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/vivo"]
       interval: 10s
       timeout: 3s
       retries: 3
       start_period: 10s
     cpus: 1.00
+    mem_limit: 256m
+    restart: unless-stopped
+    networks: [interna]
+
+  worker-llm:
+    image: ghcr.io/ser-martinezs/servicio-dominio:ep3   # misma imagen que el dominio, otro proceso
+    command: ["python", "worker.py"]
+    environment:
+      DATABASE_URL: postgresql://kipu:${POSTGRES_PASSWORD:-kipu_local}@db:5432/kipu
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-kipu}:${RABBITMQ_PASSWORD:-kipu_local}@rabbitmq:5672/%2F
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}    # solo en el .env del servidor, nunca en el repositorio
+      NVIDIA_MODEL: ${NVIDIA_MODEL:-}
+      NVIDIA_TIMEOUT_S: ${NVIDIA_TIMEOUT_S:-15}
+      NVIDIA_REINTENTOS: ${NVIDIA_REINTENTOS:-4}
+    depends_on:
+      db:       { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      dominio:  { condition: service_healthy }
+    healthcheck:
+      disable: true                          # no expone puertos; si se cae, Docker lo reinicia
+    cpus: 0.25
+    mem_limit: 128m
+    restart: unless-stopped
+    networks: [interna]
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine      # sin puertos publicados: solo la red interna
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-kipu}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-kipu_local}
+    volumes:
+      - datos-rabbitmq:/var/lib/rabbitmq     # la cola es durable: sobrevive a un reinicio
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    cpus: 0.50
     mem_limit: 256m
     restart: unless-stopped
     networks: [interna]
@@ -84,7 +128,7 @@ services:
     networks: [interna]
 
   carga:
-    image: ghcr.io/ser-martinezs/servicio-carga:ep2
+    image: ghcr.io/ser-martinezs/servicio-carga:ep3
     environment:
       DATABASE_URL: postgresql://kipu:${POSTGRES_PASSWORD:-kipu_local}@db:5432/kipu
     depends_on:
@@ -119,6 +163,7 @@ services:
 
 volumes:
   datos-pg:
+  datos-rabbitmq:
 
 networks:
   interna:

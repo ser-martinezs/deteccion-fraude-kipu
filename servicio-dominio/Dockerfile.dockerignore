@@ -2,3 +2,5 @@
 *
 !servicio-dominio/requirements.txt
 !servicio-dominio/main.py
+!servicio-dominio/anonimizar.py
+!servicio-dominio/worker.py
