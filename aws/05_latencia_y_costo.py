@@ -21,6 +21,7 @@ Uso:
   python aws/05_latencia_y_costo.py                                 # completo: espera 12 min sin uso y mide
   python aws/05_latencia_y_costo.py --comparar-memoria 2048,3072 --aplicar-mejor
 Guarda aws/latencia_<fecha>.json con todo lo medido.
+  python aws/05_latencia_y_costo.py --recalcular aws/latencia_XXXX.json     # rehace costo y concurrencia sin tocar AWS
 """
 import argparse
 import json
@@ -99,6 +100,7 @@ def estadisticas(res, segundos, p99_objetivo):
     return {"n": len(res), "ok": int(len(oks)), "errores": errores, "media_ms": float(oks.mean()), "min_ms": float(oks.min()),
             "p50_ms": float(p50), "p90_ms": float(p90), "p95_ms": float(p95), "p99_ms": float(p99), "max_ms": float(oks.max()),
             "solicitudes_por_s": len(res) / segundos if segundos > 0 else None, "cumple_p99": bool(p99 <= p99_objetivo),
+            "sobre_1s": int((oks > 1000).sum()),
             "bytes_por_solicitud": float(np.mean([r["bytes"] for r in res if r["ok"]]))}
 
 
@@ -159,6 +161,33 @@ def cloudwatch_servidor(cw, endpoint, desde, esperadas, espera_s):
         time.sleep(20)
 
 
+def estimar(servidor, est, memoria_mb, concurrencia, solicitudes_mes):
+    """Milisegundos facturados, costo mensual y concurrencia que exige el pico.
+    Usa la MEDIANA de CloudWatch, no el promedio: cada arranque en frío dura ~10 s y, con solo unos pocos en la medición,
+    inflan el promedio de OverheadLatency (en una medición real pasó de ~35 ms típicos a 67 ms) y exageraban costo y concurrencia."""
+    if servidor and "modelo_p50_ms" in servidor and "overhead_p50_ms" in servidor:
+        ms, fuente = servidor["modelo_p50_ms"] + servidor["overhead_p50_ms"], "mediana (p50) de ModelLatency + OverheadLatency en CloudWatch"
+    elif servidor and "modelo_prom_ms" in servidor:
+        ms, fuente = servidor["modelo_prom_ms"] + servidor.get("overhead_prom_ms", 0.0), "PROMEDIO de ModelLatency + OverheadLatency (se infla con los arranques en frío)"
+    else:
+        ms, fuente = est["p50_ms"], "p50 medido desde el cliente (incluye la red: sobreestima)"
+    conc = max(1, math.ceil(PICO_RPS * ms / 1000))                                        # ley de Little: llegadas/s × tiempo de servicio
+    costo = costo_mensual(solicitudes_mes, ms, memoria_mb, est["bytes_por_solicitud"])
+    costo_pc = costo_mensual(solicitudes_mes, ms, memoria_mb, est["bytes_por_solicitud"], pc=conc)
+    print(f"   Costo mensual estimado ({solicitudes_mes:,.0f} solicitudes, {memoria_mb} MB, ~{ms:.0f} ms por {fuente}): "
+          f"USD {costo['total']:,.2f}  (cómputo {costo['computo']:,.2f} + datos {costo['datos']:,.2f})")
+    print(f"   Con concurrencia aprovisionada de {conc} las 24 h: USD {costo_pc['total']:,.2f}  (aprovisionado {costo_pc['aprovisionado']:,.2f})")
+    if concurrencia < conc:
+        veredicto = "NO ALCANZA → habrá throttling en el pico; sube --concurrencia en el paso 03"
+    elif concurrencia < 2 * conc:
+        veredicto = "alcanza, pero con poco margen: el tope no cuesta nada si no se usa, considera subir --concurrencia en el paso 03"
+    else:
+        veredicto = "alcanza con margen"
+    print(f"   Concurrencia en el pico ({PICO_RPS:.0f} req/s × {ms:.0f} ms) ≈ {conc}; el endpoint admite {concurrencia}: {veredicto}")
+    return {"ms_facturados": ms, "fuente_ms": fuente, "concurrencia_necesaria_pico": conc, "costo_mensual_usd": costo,
+            "costo_mensual_con_pc_usd": costo_pc, "solicitudes_mes": solicitudes_mes}
+
+
 # ---------------------------------------------------------------- una medición completa
 def medir(sess, endpoint, cuerpos, args, memoria_mb, concurrencia, solicitudes_mes, frio_min):
     rt, cw = cliente_medicion(sess), sess.client("cloudwatch")
@@ -177,9 +206,13 @@ def medir(sess, endpoint, cuerpos, args, memoria_mb, concurrencia, solicitudes_m
     res, seg = serie_caliente(rt, endpoint, cuerpos, args.n, args.hilos)
     est = estadisticas(res, seg, args.p99_ms)
     if est["ok"]:
+        codigos = f" {est['errores']}" if est["errores"] else ""
         print(f"   En caliente (n={est['n']}, {args.hilos} hilo(s)): p50 {est['p50_ms']:.0f} · p90 {est['p90_ms']:.0f} · p95 {est['p95_ms']:.0f} · "
-              f"p99 {est['p99_ms']:.0f} · máx {est['max_ms']:.0f} ms · errores {sum(est['errores'].values())}"
+              f"p99 {est['p99_ms']:.0f} · máx {est['max_ms']:.0f} ms · errores {sum(est['errores'].values())}{codigos}"
               f"  →  p99 ≤ {args.p99_ms:g} ms: {'CUMPLE' if est['cumple_p99'] else 'NO CUMPLE'}")
+        if est["sobre_1s"]:
+            print(f"   Aviso: {est['sobre_1s']} invocación(es) de la serie tardaron más de 1 s (≈ arranques en frío con el endpoint ya en uso: "
+                  "contenedor reciclado o escalado). Afectan al p99.9 y a la política de reserva del dominio, no a este p99.")
         if est["n"] < 500:
             print(f"   (con n={est['n']} el p99 se apoya en {max(1, round(est['n'] * 0.01))} observación(es): para el informe usa --n 1000)")
     else:
@@ -201,23 +234,8 @@ def medir(sess, endpoint, cuerpos, args, memoria_mb, concurrencia, solicitudes_m
         except Exception as e:
             print(f"   (no pude leer CloudWatch: {type(e).__name__}: {e})")
 
-    # costo y concurrencia
-    if servidor and "modelo_prom_ms" in servidor:
-        ms_fact, fuente = servidor["modelo_prom_ms"] + servidor.get("overhead_prom_ms", 0.0), "ModelLatency+OverheadLatency de CloudWatch"
-    else:
-        ms_fact, fuente = est["p50_ms"], "p50 medido desde el cliente (incluye la red: sobreestima)"
-    conc_necesaria = max(1, math.ceil(PICO_RPS * ms_fact / 1000))                         # ley de Little: llegadas/s × tiempo de servicio
-    costo = costo_mensual(solicitudes_mes, ms_fact, memoria_mb, est["bytes_por_solicitud"])
-    costo_pc = costo_mensual(solicitudes_mes, ms_fact, memoria_mb, est["bytes_por_solicitud"], pc=conc_necesaria)
-    print(f"   Costo mensual estimado ({solicitudes_mes:,.0f} solicitudes, {memoria_mb} MB, ~{ms_fact:.0f} ms facturados por {fuente}): "
-          f"USD {costo['total']:,.2f}  (cómputo {costo['computo']:,.2f} + datos {costo['datos']:,.2f})")
-    print(f"   Con concurrencia aprovisionada de {conc_necesaria} las 24 h: USD {costo_pc['total']:,.2f}  (aprovisionado {costo_pc['aprovisionado']:,.2f})")
-    ok_conc = concurrencia >= conc_necesaria
-    print(f"   Concurrencia en el pico ({PICO_RPS:.0f} req/s × {ms_fact:.0f} ms) ≈ {conc_necesaria}; el endpoint admite {concurrencia}: "
-          f"{'alcanza' if ok_conc else 'NO ALCANZA → habrá throttling en el pico; sube --concurrencia en el paso 03'}")
-    return {"memoria_mb": memoria_mb, "concurrencia_configurada": concurrencia, "frio": frio, "caliente": est, "servidor": servidor,
-            "ms_facturados": ms_fact, "fuente_ms": fuente, "concurrencia_necesaria_pico": conc_necesaria,
-            "costo_mensual_usd": costo, "costo_mensual_con_pc_usd": costo_pc, "solicitudes_mes": solicitudes_mes}
+    calc = estimar(servidor, est, memoria_mb, concurrencia, solicitudes_mes)
+    return {"memoria_mb": memoria_mb, "concurrencia_configurada": concurrencia, "frio": frio, "caliente": est, "servidor": servidor, **calc}
 
 
 # ---------------------------------------------------------------- programa principal
@@ -242,11 +260,22 @@ def main(argv=None):
     ap.add_argument("--concurrencia", type=int, help="MaxConcurrency al reconfigurar (por defecto la del paso 03)")
     ap.add_argument("--aplicar-mejor", action="store_true", help="con --comparar-memoria, deja el endpoint en el tamaño recomendado")
     ap.add_argument("--solicitudes-mes", type=float, help="por defecto 200.000 al día × 30")
+    ap.add_argument("--recalcular", metavar="ARCHIVO", help="recalcula costo y concurrencia desde un latencia_*.json ya guardado (no llama a AWS)")
     ap.add_argument("--sin-cloudwatch", action="store_true")
     ap.add_argument("--espera-cw", type=int, default=240, help="segundos máximos esperando a CloudWatch")
     args = ap.parse_args(argv)
     if args.rapido:
         args.frio_min, args.n, args.sin_cloudwatch = 0, 20, True
+
+    if args.recalcular:
+        datos = json.loads(open(args.recalcular, encoding="utf-8").read())
+        volumen = args.solicitudes_mes or config.importar_entrenar().TX_DIA * DIAS_MES
+        for m in datos["mediciones"]:
+            if not m.get("caliente", {}).get("ok"):
+                continue
+            print(f"\n== {m['memoria_mb']} MB · recalculado desde {args.recalcular} ==")
+            estimar(m.get("servidor"), m["caliente"], m["memoria_mb"], m.get("concurrencia_configurada", 5), volumen)
+        return 0
 
     est = config.leer_estado()
     endpoint = args.endpoint or config.requerir(est, "endpoint", "03_desplegar_endpoint.py")

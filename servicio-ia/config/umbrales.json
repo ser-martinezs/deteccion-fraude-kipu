@@ -1,17 +1,17 @@
 {
   "version": "u-sm-0001",
-  "version_modelo": "3.0.0",
+  "version_modelo": "3.1.0",
   "umbrales": {
-    "revisar_dia": 0.0005527786369235996,
-    "bloquear_dia": 0.060086650174007626,
-    "bloquear_noche": 0.01798620996209156
+    "revisar_dia": 0.02931223075135632,
+    "bloquear_dia": 0.2689414213699951,
+    "bloquear_noche": 0.014063627043245475
   },
   "unidad": "probabilidad de fraude EN PRODUCCIÓN (ya calibrada por el endpoint)",
   "reglas_duras": [
     "lista_negra:solicitud_cumplimiento"
   ],
   "creado_por": "aws/04_invocar_y_metricas.py (propuesta)",
-  "creado_en": "2026-11-21T20:21:47+00:00",
+  "creado_en": "2026-11-22T03:29:06+00:00",
   "motivo": "mínimo costo en validación con revisiones ≤ capacidad de analistas y FP ≤ 15%",
   "autorizado_por": "PENDIENTE: gerencia de riesgo (DA5 / RO5)"
 }
